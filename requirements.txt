@@ -1,0 +1,9 @@
+pywebview
+requests 
+tqdm
+pyaudio 
+sounddevice 
+numpy
+
+# dev
+pyinstaller
