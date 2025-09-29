@@ -16,7 +16,7 @@ import hashlib
 import logging
 import time
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
 import pyaudio
 import wave
 import numpy as np
@@ -515,24 +515,21 @@ class VirtualAudioManager:
     
     def __init__(self):
         self.p = pyaudio.PyAudio()
-        self.streaming_thread = None
-        self.stop_streaming = False
         self.current_stream = None
-        self.audio_queue = []
+        self.stop_streaming = False
+        self.sample_rate = 24000
+        self.channels = 1
         
     def get_virtual_microphones(self) -> List[Dict[str, Any]]:
         """Get list of available virtual microphones"""
         virtual_mics = []
         
         try:
-            # Get all audio devices
             for i in range(self.p.get_device_count()):
                 device_info = self.p.get_device_info_by_index(i)
                 device_name = device_info.get('name', '').lower()
                 
-                # Check if it's an output device (where we can send audio)
                 if device_info.get('maxOutputChannels', 0) > 0:
-                    # Common virtual microphone patterns
                     virtual_patterns = [
                         'virtual', 'vb-audio', 'voicemeeter', 'cable',
                         'obs', 'elgato', 'streamlabs', 'blackhole',
@@ -541,12 +538,7 @@ class VirtualAudioManager:
                     
                     is_virtual = any(pattern in device_name for pattern in virtual_patterns)
                     
-                    # Also check for specific virtual audio software
-                    if (is_virtual or 
-                        'virtual' in device_name or
-                        'cable' in device_name or
-                        'voicemeeter' in device_name):
-                        
+                    if is_virtual or 'virtual' in device_name or 'cable' in device_name:
                         virtual_mics.append({
                             'id': i,
                             'name': device_info.get('name', f'Device {i}'),
@@ -555,14 +547,12 @@ class VirtualAudioManager:
                             'device_index': i
                         })
             
-            # Add some common virtual mics that might not be auto-detected
+            # Add common virtual mics if not detected
             common_virtuals = [
                 {'id': 'vb-cable', 'name': 'VB-Audio Virtual Cable', 'channels': 2, 'sample_rate': 48000},
                 {'id': 'voicemeeter', 'name': 'VoiceMeeter Input', 'channels': 2, 'sample_rate': 48000},
-                {'id': 'obs-virtual', 'name': 'OBS Virtual Audio', 'channels': 2, 'sample_rate': 44100},
             ]
             
-            # Add common ones if not already detected
             for common in common_virtuals:
                 if not any(common['name'].lower() in vm['name'].lower() for vm in virtual_mics):
                     virtual_mics.append(common)
@@ -572,17 +562,16 @@ class VirtualAudioManager:
             
         return virtual_mics
     
-    def start_streaming_to_virtual_mic(self, audio_data: bytes, device_index: int, 
-                                     sample_rate: int = 24000, channels: int = 1):
-        """Stream audio data to virtual microphone"""
+    def initialize_stream(self, device_index: int, sample_rate: int = 24000, channels: int = 1):
+        """Initialize audio stream once at the beginning"""
         try:
             if self.current_stream:
                 self.stop_streaming_to_virtual_mic()
             
-            # Convert audio data to numpy array
-            audio_array = np.frombuffer(audio_data, dtype=np.int16)
+            self.sample_rate = sample_rate
+            self.channels = channels
+            self.stop_streaming = False
             
-            # Open audio stream to virtual microphone
             self.current_stream = self.p.open(
                 format=pyaudio.paInt16,
                 channels=channels,
@@ -592,31 +581,45 @@ class VirtualAudioManager:
                 frames_per_buffer=1024
             )
             
-            # Stream the audio
-            chunk_size = 1024
-            for i in range(0, len(audio_array), chunk_size):
-                if self.stop_streaming:
-                    break
-                chunk = audio_array[i:i + chunk_size]
-                if len(chunk) < chunk_size:
-                    # Pad the last chunk
-                    chunk = np.pad(chunk, (0, chunk_size - len(chunk)), 'constant')
-                
-                self.current_stream.write(chunk.tobytes())
-                
+            print(f"✅ Initialized audio stream on device {device_index}")
+            return True
+            
         except Exception as e:
-            print(f"Error streaming to virtual mic: {e}")
+            print(f"❌ Error initializing stream: {e}")
+            return False
+    
+    def send_audio_chunk(self, audio_chunk: bytes):
+        """Send a single audio chunk to the virtual mic (real-time)"""
+        if not self.current_stream:
+            print("❌ Stream not initialized")
+            return False
+        
+        if self.stop_streaming:
             return False
             
-        return True
+        try:
+            # Convert bytes to numpy array
+            audio_array = np.frombuffer(audio_chunk, dtype=np.int16)
+            
+            # Write to stream immediately
+            self.current_stream.write(audio_array.tobytes())
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error sending chunk: {e}")
+            return False
     
     def stop_streaming_to_virtual_mic(self):
-        """Stop streaming to virtual microphone"""
+        """Stop streaming and close the stream"""
         self.stop_streaming = True
         if self.current_stream:
-            self.current_stream.stop_stream()
-            self.current_stream.close()
-            self.current_stream = None
+            try:
+                self.current_stream.stop_stream()
+                self.current_stream.close()
+                self.current_stream = None
+                print("✅ Stream stopped and closed")
+            except Exception as e:
+                print(f"Error stopping stream: {e}")
     
     def cleanup(self):
         """Cleanup audio resources"""
@@ -630,8 +633,7 @@ class TTSStreamingAPI:
     def __init__(self):
         self.virtual_audio = VirtualAudioManager()
         self.streaming_active = False
-        self.streaming_thread = None
-        self.stop_event = threading.Event()
+        self.current_session_id = None
         
     def get_virtual_microphones(self) -> Dict[str, Any]:
         """Get available virtual microphones"""
@@ -647,6 +649,81 @@ class TTSStreamingAPI:
                 "error": str(e)
             }
     
+    def initialize_virtual_mic_stream(self, virtual_mic_index: int, sample_rate: int = 24000) -> Dict[str, Any]:
+        """Initialize the virtual mic stream BEFORE streaming starts"""
+        try:
+            success = self.virtual_audio.initialize_stream(virtual_mic_index, sample_rate)
+            
+            if success:
+                self.streaming_active = True
+                return {
+                    "success": True,
+                    "message": "Virtual mic stream initialized"
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "Failed to initialize stream"
+                }
+                
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def send_audio_chunk_to_virtual_mic(self, audio_chunk_data: Union[List[int], bytes], 
+                                        device_index: int) -> Dict[str, Any]:
+        """
+        Send a single audio chunk to the virtual mic in real-time
+        Called by frontend for each SSE chunk received
+        """
+        try:
+            # Convert list to bytes if needed
+            if isinstance(audio_chunk_data, list):
+                audio_bytes = bytes(audio_chunk_data)
+            else:
+                audio_bytes = audio_chunk_data
+            
+            # Send immediately to virtual mic
+            success = self.virtual_audio.send_audio_chunk(audio_bytes)
+            
+            return {
+                "success": success
+            }
+            
+        except Exception as e:
+            print(f"Error sending chunk to virtual mic: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def stop_virtual_mic_streaming(self) -> Dict[str, Any]:
+        """Stop the virtual mic stream"""
+        try:
+            self.virtual_audio.stop_streaming_to_virtual_mic()
+            self.streaming_active = False
+            
+            return {
+                "success": True,
+                "message": "Virtual mic streaming stopped"
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def get_streaming_status(self) -> Dict[str, Any]:
+        """Get current streaming status"""
+        return {
+            "success": True,
+            "streaming_active": self.streaming_active,
+            "has_stream": self.virtual_audio.current_stream is not None
+        }
+        
     def generate_tts(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
         """Original TTS generation (non-streaming)"""
         try:
@@ -685,161 +762,12 @@ class TTSStreamingAPI:
                 "error": str(e)
             }
     
-    def start_tts_streaming(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Start streaming TTS to virtual microphone"""
-        try:
-            text = request_data.get("text", "")
-            voice_data = request_data.get("voice_blob_data", "")
-            server_url = request_data.get("server_url", "")
-            virtual_mic_id = request_data.get("virtual_mic_id")
-            virtual_mic_index = request_data.get("virtual_mic_index", 0)
-            
-            if self.streaming_active:
-                return {
-                    "success": False,
-                    "error": "Streaming already active. Stop current stream first."
-                }
-            
-            # Decode the voice data
-            voice_bytes = base64.b64decode(voice_data)
-            
-            # Create files for streaming request
-            files = {
-                'voice_file': ('voice_sample.wav', io.BytesIO(voice_bytes), 'audio/wav')
-            }
-            data = {'text': text}
-            
-            # Start streaming thread
-            self.stop_event.clear()
-            self.streaming_thread = threading.Thread(
-                target=self._streaming_worker,
-                args=(server_url, files, data, virtual_mic_index)
-            )
-            self.streaming_thread.daemon = True
-            self.streaming_thread.start()
-            self.streaming_active = True
-            
-            return {
-                "success": True,
-                "message": "Streaming started",
-                "virtual_mic_id": virtual_mic_id
-            }
-            
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def _streaming_worker(self, server_url: str, files: Dict, data: Dict, virtual_mic_index: int):
-        """Worker thread for handling streaming"""
-        try:
-            # Make streaming request to server
-            with requests.post(
-                f"{server_url}/single-speaker-stream",
-                files=files,
-                data=data,
-                stream=True,
-                timeout=60
-            ) as response:
-                
-                if not response.ok:
-                    print(f"Streaming request failed: {response.status_code}")
-                    return
-                
-                # Process SSE stream
-                audio_chunks = []
-                for line in response.iter_lines():
-                    if self.stop_event.is_set():
-                        break
-                        
-                    if line:
-                        line = line.decode('utf-8')
-                        if line.startswith('data: '):
-                            try:
-                                data_json = json.loads(line[6:])  # Remove 'data: ' prefix
-                                
-                                if data_json.get('type') == 'audio_chunk':
-                                    # Decode hex audio data
-                                    hex_data = data_json.get('audio_data', '')
-                                    chunk_bytes = bytes.fromhex(hex_data)
-                                    audio_chunks.append(chunk_bytes)
-                                    
-                                    # Send chunk to frontend (via callback if needed)
-                                    self._send_chunk_to_frontend(data_json)
-                                    
-                                elif data_json.get('type') == 'complete':
-                                    print("Streaming completed")
-                                    break
-                                    
-                                elif data_json.get('type') == 'error':
-                                    print(f"Streaming error: {data_json.get('message')}")
-                                    break
-                                    
-                            except json.JSONDecodeError:
-                                continue
-                
-                # Combine all chunks and stream to virtual microphone
-                if audio_chunks:
-                    combined_audio = b''.join(audio_chunks)
-                    self.virtual_audio.start_streaming_to_virtual_mic(
-                        combined_audio, virtual_mic_index
-                    )
-                
-        except Exception as e:
-            print(f"Streaming worker error: {e}")
-        finally:
-            self.streaming_active = False
-    
-    def _send_chunk_to_frontend(self, chunk_data: Dict[str, Any]):
-        """Send audio chunk to frontend (implement as needed)"""
-        # This could trigger a callback to the frontend
-        # For now, just print the chunk info
-        print(f"Received audio chunk {chunk_data.get('chunk_id', 0)}")
-    
-    def stop_tts_streaming(self) -> Dict[str, Any]:
-        """Stop current streaming"""
-        try:
-            if not self.streaming_active:
-                return {
-                    "success": False,
-                    "error": "No active streaming to stop"
-                }
-            
-            # Signal stop
-            self.stop_event.set()
-            self.virtual_audio.stop_streaming_to_virtual_mic()
-            
-            # Wait for thread to finish
-            if self.streaming_thread and self.streaming_thread.is_alive():
-                self.streaming_thread.join(timeout=5)
-            
-            self.streaming_active = False
-            
-            return {
-                "success": True,
-                "message": "Streaming stopped"
-            }
-            
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def get_streaming_status(self) -> Dict[str, Any]:
-        """Get current streaming status"""
-        return {
-            "success": True,
-            "streaming_active": self.streaming_active,
-            "thread_alive": self.streaming_thread.is_alive() if self.streaming_thread else False
-        }
     
     def cleanup(self):
         """Cleanup resources"""
-        self.stop_tts_streaming()
+        self.stop_virtual_mic_streaming()
         self.virtual_audio.cleanup()
-
+        
 class Api:
     def __init__(self):
         self._active_runpod_instance: Optional[Dict[str, str]] = None
@@ -1207,29 +1135,80 @@ class Api:
                 "error": str(e)
             }
             
+    def generate_tts(self, request_data):
+        """Original TTS generation (non-streaming)"""
+        return self.tts_api.generate_tts(request_data)
+
     def get_virtual_microphones(self):
         """Get available virtual microphones"""
         return self.tts_api.get_virtual_microphones()
     
+  
     def generate_tts(self, request_data):
-        """Original TTS generation (non-streaming)"""
+        """Original TTS generation (non-streaming) - for backward compatibility"""
         return self.tts_api.generate_tts(request_data)
     
-    def start_tts_streaming(self, request_data):
-        """Start streaming TTS to virtual microphone"""
-        return self.tts_api.start_tts_streaming(request_data)
+  
+    def initialize_virtual_mic_stream(self, virtual_mic_index, sample_rate=24000):
+        """
+        Initialize virtual mic stream BEFORE streaming starts
+        Call this first when user clicks "Start Streaming"
+        
+        Args:
+            virtual_mic_index (int): Device index of virtual microphone
+            sample_rate (int): Audio sample rate (default: 24000)
+            
+        Returns:
+            dict: {"success": bool, "message": str or "error": str}
+        """
+        return self.tts_api.initialize_virtual_mic_stream(virtual_mic_index, sample_rate)
     
-    def stop_tts_streaming(self):
-        """Stop current streaming"""
-        return self.tts_api.stop_tts_streaming()
+    def send_audio_chunk_to_virtual_mic(self, audio_chunk_data, device_index):
+        """
+        Send a single audio chunk to virtual mic in real-time
+        Called by frontend for each SSE chunk received
+        
+        Args:
+            audio_chunk_data (list or bytes): Audio data as list of integers or bytes
+            device_index (int): Device index of virtual microphone
+            
+        Returns:
+            dict: {"success": bool, "error": str (optional)}
+        """
+        return self.tts_api.send_audio_chunk_to_virtual_mic(audio_chunk_data, device_index)
+    
+    def stop_virtual_mic_streaming(self):
+        """
+        Stop the virtual mic stream
+        Call this when streaming is complete or user stops
+        
+        Returns:
+            dict: {"success": bool, "message": str or "error": str}
+        """
+        return self.tts_api.stop_virtual_mic_streaming()
+    
     
     def get_streaming_status(self):
-        """Get current streaming status"""
+        """
+        Get current streaming status
+        
+        Returns:
+            dict: {
+                "success": bool,
+                "streaming_active": bool,
+                "has_stream": bool
+            }
+        """
         return self.tts_api.get_streaming_status()
-
+    
     def cleanup_on_exit(self):
-        """Cleanup when app is closing"""
+        """
+        Cleanup when app is closing
+        Called automatically on window close
+        """
+        print("🧹 Cleaning up TTS API resources...")
         self.tts_api.cleanup()
+        return {"success": True, "message": "Cleanup completed"}
 
 def on_closing():
     """Enhanced application exit handler."""
