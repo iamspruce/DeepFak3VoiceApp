@@ -1,11 +1,7 @@
 pywebview
-webview
 requests 
 tqdm
-pyaudio 
-pyvirtualcam
-sounddevice 
 numpy
-
+pyaudio
 # dev
 pyinstaller

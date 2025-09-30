@@ -38,9 +38,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
+      # --- ADDED THIS STEP ---
+      - name: Install system dependencies
+        run: brew install portaudio
+
+      - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip wheel setuptools
           pip install -r requirements.txt
 
       - name: Build with PyInstaller
@@ -88,9 +92,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
+      # --- MODIFIED THIS STEP ---
+      # On Windows, pip should find a pre-compiled wheel.
+      # Upgrading pip, wheel, and setuptools is the best first step.
+      - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip wheel setuptools
           pip install -r requirements.txt
 
       - name: Build with PyInstaller
