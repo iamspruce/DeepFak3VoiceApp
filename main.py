@@ -16,10 +16,7 @@ import hashlib
 import logging
 import time
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Union
-import pyaudio
-import numpy as np
-
+from typing import Optional, Dict, Any
 
 
 # Setup logging
@@ -500,85 +497,13 @@ class LocalServerManager:
         logger.error(f"Server failed to become ready within {timeout} seconds")
         return False
 
-class VirtualAudioManager:
-    """Manages virtual microphone detection and audio streaming"""
-    
-    def __init__(self):
-        self.p = pyaudio.PyAudio()
-        self.current_stream = None
-        self.stop_streaming = False
-        self.sample_rate = 24000
-        self.channels = 1
-        
-    def get_virtual_microphones(self) -> List[Dict[str, Any]]:
-        """Get list of available virtual microphones"""
-        virtual_mics = []
-        
-        try:
-            for i in range(self.p.get_device_count()):
-                device_info = self.p.get_device_info_by_index(i)
-                device_name = device_info.get('name', '').lower()
-                
-                if device_info.get('maxOutputChannels', 0) > 0:
-                    virtual_patterns = [
-                        'virtual', 'vb-audio', 'voicemeeter', 'cable',
-                        'obs', 'elgato', 'streamlabs', 'blackhole',
-                        'soundflower', 'jack', 'asio', 'wasapi'
-                    ]
-                    
-                    is_virtual = any(pattern in device_name for pattern in virtual_patterns)
-                    
-                    if is_virtual or 'virtual' in device_name or 'cable' in device_name:
-                        virtual_mics.append({
-                            'id': i,
-                            'name': device_info.get('name', f'Device {i}'),
-                            'channels': device_info.get('maxOutputChannels', 0),
-                            'sample_rate': device_info.get('defaultSampleRate', 44100),
-                            'device_index': i
-                        })
-            
-            # Add common virtual mics if not detected
-            common_virtuals = [
-                {'id': 'vb-cable', 'name': 'VB-Audio Virtual Cable', 'channels': 2, 'sample_rate': 48000},
-                {'id': 'voicemeeter', 'name': 'VoiceMeeter Input', 'channels': 2, 'sample_rate': 48000},
-            ]
-            
-            for common in common_virtuals:
-                if not any(common['name'].lower() in vm['name'].lower() for vm in virtual_mics):
-                    virtual_mics.append(common)
-                    
-        except Exception as e:
-            print(f"Error getting virtual microphones: {e}")
-            
-        return virtual_mics
-    
-    def cleanup(self):
-        """Cleanup audio resources"""
-        if self.p:
-            self.p.terminate()
-
 class TTSStreamingAPI:
     """API bridge for TTS streaming functionality"""
     
     def __init__(self):
-        self.virtual_audio = VirtualAudioManager()
         self.streaming_active = False
         self.current_session_id = None
         
-    def get_virtual_microphones(self) -> Dict[str, Any]:
-        """Get available virtual microphones"""
-        try:
-            virtual_mics = self.virtual_audio.get_virtual_microphones()
-            return {
-                "success": True,
-                "virtual_mics": virtual_mics
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
     def get_streaming_status(self) -> Dict[str, Any]:
         """Get current streaming status"""
         return {
@@ -1001,10 +926,6 @@ class Api:
     def generate_tts(self, request_data):
         """Original TTS generation (non-streaming)"""
         return self.tts_api.generate_tts(request_data)
-
-    def get_virtual_microphones(self):
-        """Get available virtual microphones"""
-        return self.tts_api.get_virtual_microphones()
     
     def get_streaming_status(self):
         """

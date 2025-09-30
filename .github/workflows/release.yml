@@ -92,9 +92,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      # --- MODIFIED THIS STEP ---
-      # On Windows, pip should find a pre-compiled wheel.
-      # Upgrading pip, wheel, and setuptools is the best first step.
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip wheel setuptools

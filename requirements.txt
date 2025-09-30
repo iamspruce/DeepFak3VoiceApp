@@ -1,7 +1,5 @@
 pywebview
 requests 
 tqdm
-numpy
-pyaudio
 # dev
 pyinstaller
