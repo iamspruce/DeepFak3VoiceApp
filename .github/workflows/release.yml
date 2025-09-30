@@ -27,7 +27,7 @@ jobs:
           prerelease: false
 
   build-macos:
-    name: Build macOS DMG
+    name: Build macOS Universal DMG
     needs: create-release
     runs-on: macos-latest
     steps:
@@ -38,7 +38,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      # --- ADDED THIS STEP ---
       - name: Install system dependencies
         run: brew install portaudio
 
@@ -47,9 +46,9 @@ jobs:
           python -m pip install --upgrade pip wheel setuptools
           pip install -r requirements.txt
 
-      - name: Build with PyInstaller
+      - name: Build with PyInstaller for Universal2
         run: |
-          pyinstaller --onefile --windowed --name DeepFak3rVoiceApp --icon app.icns --add-data 'out:out' main.py
+          pyinstaller --onefile --windowed --name DeepFak3rVoiceApp --icon app.icns --add-data 'out:out' --target-arch universal2 main.py
 
       - name: Install create-dmg
         run: brew install create-dmg
@@ -67,7 +66,7 @@ jobs:
             --icon "DeepFak3rVoiceApp.app" 175 120 \
             --hide-extension "DeepFak3rVoiceApp.app" \
             --app-drop-link 425 120 \
-            "dist/DeepFak3rVoiceApp.dmg" \
+            "dist/DeepFak3rVoiceApp-universal.dmg" \
             "dist/dmg/"
 
       - name: Upload Release Asset
@@ -76,8 +75,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: dist/DeepFak3rVoiceApp.dmg
-          asset_name: DeepFak3rVoiceApp.dmg
+          asset_path: dist/DeepFak3rVoiceApp-universal.dmg
+          asset_name: DeepFak3rVoiceApp-macOS-universal.dmg
           asset_content_type: application/octet-stream
 
   build-windows:
