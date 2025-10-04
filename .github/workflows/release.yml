@@ -51,19 +51,16 @@ jobs:
           pyinstaller --onefile --windowed --name DeepFak3rVoice --icon app.icns --add-data 'out:out' --target-arch universal2 main.py
 
       - name: Sign macOS App
-        # This step decodes the certificate, imports it into a temporary keychain,
-        # signs the app, and then cleans up.
         run: |
           echo "${{ secrets.SIGNING_CERTIFICATE_BASE64 }}" | base64 --decode > certificate.pfx
-          KEYCHAIN_PASSWORD="${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}"
 
-          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          # Use the environment variable directly to avoid shell interpretation issues
+          security create-keychain -p "$SIGNING_CERTIFICATE_PASSWORD" build.keychain
           security default-keychain -s build.keychain
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security unlock-keychain -p "$SIGNING_CERTIFICATE_PASSWORD" build.keychain
 
-          security import certificate.pfx -k build.keychain -P "$KEYCHAIN_PASSWORD" -T /usr/bin/codesign
+          security import certificate.pfx -k build.keychain -P "$SIGNING_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
 
-          # Find the identity for signing
           IDENTITY=$(security find-identity -v -p codesigning build.keychain | head -n 1 | sed -e 's/^[^(]*("\(.*\)")/\1/' | sed 's/"//g')
           echo "Signing with identity: $IDENTITY"
 
@@ -125,13 +122,10 @@ jobs:
           pyinstaller --onefile --windowed --name DeepFak3rVoice --icon app.ico --add-data "out;out" main.py
 
       - name: Sign Windows Executable
-        # This step finds signtool.exe, decodes the certificate, and signs the EXE
-        # with a trusted timestamp.
         run: |
           $cert_pfx_path = "certificate.pfx"
           [IO.File]::WriteAllBytes($cert_pfx_path, [System.Convert]::FromBase64String("${{ secrets.SIGNING_CERTIFICATE_BASE64 }}"))
 
-          # Find the latest Windows SDK path for signtool
           $sdk_dir = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Filter "signtool.exe" -Recurse | Select-Object -Last 1).DirectoryName
           $signtool_path = Join-Path $sdk_dir "signtool.exe"
 
@@ -148,5 +142,45 @@ jobs:
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
           asset_path: dist/DeepFak3rVoice.exe
-          asset_name: DeepFak3rVoice.exe
+          asset_name: DeepFak3rVoice-Windows-x64.exe
           asset_content_type: application/vnd.microsoft.portable-executable
+
+  build-linux:
+    name: Build Linux Executable
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y portaudio19-dev
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+          pip install -r requirements.txt
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --onefile --name DeepFak3rVoice --add-data 'out:out' main.py
+
+      - name: Package for release
+        run: |
+          tar -czvf DeepFak3rVoice-Linux.tar.gz -C dist DeepFak3rVoice
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./DeepFak3rVoice-Linux.tar.gz
+          asset_name: DeepFak3rVoice-Linux-x86_64.tar.gz
+          asset_content_type: application/gzip
