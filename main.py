@@ -34,15 +34,16 @@ class LocalServerManager:
     def __init__(self, progress_callback):
         self.progress_callback = progress_callback
         self.server_process = None
+        self.log_file = None
         self.setup_cancelled = False
         
         # Configuration
-        self.github_repo = "your-org/tts-server"  # Update this to actual repo
+        self.github_repo = "iamspruce/deepfak3voice"  
         self.release_tag = "latest"
         self.server_port = 8000
         self.os_name, self.arch = self._get_os_arch()
         self.install_path = self._get_applications_folder(self.os_name)
-        self.executable_name = "tts-server.exe" if self.os_name == "windows" else "tts-server"
+        self.executable_name = "vibevoice-server.exe" if self.os_name == "windows" else "vibevoice-server"
         self.executable_path = os.path.join(self.install_path, self.executable_name)
         self.config_path = os.path.join(self.install_path, "config.json")
         self.log_path = os.path.join(self.install_path, "server.log")
@@ -96,8 +97,8 @@ class LocalServerManager:
 
     def _get_download_url(self, os_name, arch):
         """Get download URL with fallback options."""
-        base_url = f"https://github.com/{self.github_repo}/releases/{self.release_tag}/download"
-        filename = f"deepfak3rvoice-tts-server-{os_name}-{arch}"
+        base_url = f"https://github.com/{self.github_repo}/releases/latest/download"
+        filename = f"vibevoice-server-{os_name}-{arch}"
         ext = "zip" if os_name == "windows" else "tar.gz"
         
         return f"{base_url}/{filename}.{ext}", f"{filename}.{ext}"
@@ -111,7 +112,7 @@ class LocalServerManager:
         if file_size < 1024 * 1024:  # Less than 1MB is suspicious
             raise ValueError(f"Downloaded file too small: {file_size} bytes")
             
-        # TODO: Implement checksum verification if checksums are provided
+        # Checksum verification if provided
         if expected_checksum:
             with open(file_path, "rb") as f:
                 file_hash = hashlib.sha256(f.read()).hexdigest()
@@ -162,11 +163,14 @@ class LocalServerManager:
             if self.setup_cancelled:
                 return
 
+            # Find the executable after extraction (might be in subdirectory)
+            self._locate_executable()
+
             # Cleanup
             try:
                 os.remove(archive_path)
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to remove archive: {e}")
 
             # Make executable (Unix-like systems)
             if self.os_name != "windows":
@@ -183,6 +187,22 @@ class LocalServerManager:
                 "message": "Setup failed",
                 "error": str(e)
             })
+
+    def _locate_executable(self):
+        """Find the executable after extraction (handles subdirectories)."""
+        # First check if it's directly in install_path
+        if os.path.exists(self.executable_path):
+            logger.info(f"Executable found at: {self.executable_path}")
+            return
+
+        # Search in subdirectories
+        for root, dirs, files in os.walk(self.install_path):
+            if self.executable_name in files:
+                self.executable_path = os.path.join(root, self.executable_name)
+                logger.info(f"Executable found at: {self.executable_path}")
+                return
+        
+        raise FileNotFoundError(f"Executable '{self.executable_name}' not found after extraction")
 
     def check_server_status(self) -> Dict[str, Any]:
         """Get comprehensive server status information."""
@@ -238,38 +258,24 @@ class LocalServerManager:
             return False
 
     def _download_with_progress(self, url, file_path):
-        """Download with progress reporting and resume support."""
+        """Download with progress reporting."""
         self.progress_callback({
             "stage": "downloading",
             "progress": 0,
             "message": "Starting download..."
         })
 
-        headers = {}
-        resume_pos = 0
-        
-        # Check if partial file exists
-        if os.path.exists(file_path):
-            resume_pos = os.path.getsize(file_path)
-            headers['Range'] = f'bytes={resume_pos}-'
-            logger.info(f"Resuming download from byte {resume_pos}")
-
         try:
-            response = requests.get(url, headers=headers, stream=True, timeout=60)
+            response = requests.get(url, stream=True, timeout=60)
             response.raise_for_status()
             
             # Get total size
             content_length = response.headers.get('content-length')
-            if content_length:
-                total_size = int(content_length) + resume_pos
-            else:
-                total_size = 0
+            total_size = int(content_length) if content_length else 0
 
-            mode = 'ab' if resume_pos > 0 else 'wb'
+            downloaded = 0
             
-            with open(file_path, mode) as f:
-                downloaded = resume_pos
-                
+            with open(file_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if self.setup_cancelled:
                         return
@@ -367,19 +373,23 @@ class LocalServerManager:
             # Determine startup flags based on OS
             startup_flags = {}
             if platform.system() == "Windows":
-                startup_flags['creationflags'] = subprocess.DETACHED_PROCESS
+                startup_flags['creationflags'] = 0x08000000  # CREATE_NO_WINDOW
             else:
                 startup_flags['close_fds'] = True
                 
             # Start server process
             cmd = [self.executable_path, "--host", "0.0.0.0", "--port", str(self.server_port)]
             
-            # Redirect output to log file
-            log_file = open(self.log_path, 'w')
+            # Close existing log file if open
+            if self.log_file and not self.log_file.closed:
+                self.log_file.close()
+            
+            # Open new log file
+            self.log_file = open(self.log_path, 'w')
             
             self.server_process = subprocess.Popen(
                 cmd,
-                stdout=log_file,
+                stdout=self.log_file,
                 stderr=subprocess.STDOUT,
                 **startup_flags
             )
@@ -411,14 +421,21 @@ class LocalServerManager:
             try:
                 self.server_process.terminate()
                 self.server_process.wait(timeout=10)
-                self.server_process = None
                 logger.info("Local server stopped")
             except subprocess.TimeoutExpired:
                 self.server_process.kill()
-                self.server_process = None
                 logger.info("Local server forcefully stopped")
             except Exception as e:
                 logger.error(f"Failed to stop local server: {e}")
+            finally:
+                self.server_process = None
+        
+        # Close log file
+        if self.log_file and not self.log_file.closed:
+            try:
+                self.log_file.close()
+            except Exception as e:
+                logger.warning(f"Failed to close log file: {e}")
 
     def _kill_existing_server(self):
         """Kill any existing server processes on the target port."""
@@ -427,34 +444,47 @@ class LocalServerManager:
                 # Windows: Find and kill process using port
                 result = subprocess.run(
                     f'netstat -ano | findstr :{self.server_port}',
-                    shell=True, capture_output=True, text=True
+                    shell=True, 
+                    capture_output=True, 
+                    text=True
                 )
                 if result.stdout:
                     lines = result.stdout.strip().split('\n')
                     for line in lines:
                         if 'LISTENING' in line:
-                            pid = line.split()[-1]
-                            try:
-                                subprocess.run(f'taskkill /PID {pid} /F', shell=True)
-                                logger.info(f"Killed existing process PID {pid}")
-                            except:
-                                pass
+                            parts = line.split()
+                            if parts:
+                                pid = parts[-1]
+                                try:
+                                    subprocess.run(
+                                        f'taskkill /PID {pid} /F', 
+                                        shell=True,
+                                        check=False,
+                                        capture_output=True
+                                    )
+                                    logger.info(f"Killed existing process PID {pid}")
+                                except Exception as e:
+                                    logger.warning(f"Failed to kill PID {pid}: {e}")
             else:
                 # Unix-like: Kill process using port
                 try:
                     result = subprocess.run(
                         ['lsof', '-ti', f'tcp:{self.server_port}'],
-                        capture_output=True, text=True
+                        capture_output=True, 
+                        text=True
                     )
                     if result.stdout:
                         pids = result.stdout.strip().split('\n')
                         for pid in pids:
                             if pid:
-                                subprocess.run(['kill', '-9', pid])
-                                logger.info(f"Killed existing process PID {pid}")
+                                try:
+                                    subprocess.run(['kill', '-9', pid], check=False)
+                                    logger.info(f"Killed existing process PID {pid}")
+                                except Exception as e:
+                                    logger.warning(f"Failed to kill PID {pid}: {e}")
                 except FileNotFoundError:
-                    # lsof not available
-                    pass
+                    # lsof not available, try alternative method
+                    logger.warning("lsof not available, skipping port cleanup")
         except Exception as e:
             logger.warning(f"Failed to kill existing server: {e}")
 
@@ -496,71 +526,11 @@ class LocalServerManager:
         
         logger.error(f"Server failed to become ready within {timeout} seconds")
         return False
-
-class TTSStreamingAPI:
-    """API bridge for TTS streaming functionality"""
-    
-    def __init__(self):
-        self.streaming_active = False
-        self.current_session_id = None
-        
-    def get_streaming_status(self) -> Dict[str, Any]:
-        """Get current streaming status"""
-        return {
-            "success": True,
-            "streaming_active": self.streaming_active,
-            "has_stream": self.virtual_audio.current_stream is not None
-        }
-        
-    def generate_tts(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Original TTS generation (non-streaming)"""
-        try:
-            text = request_data.get("text", "")
-            voice_data = request_data.get("voice_blob_data", "")
-            server_url = request_data.get("server_url", "")
-            
-            # Decode the voice data
-            voice_bytes = base64.b64decode(voice_data)
-            
-            # Create files dict for requests
-            files = {
-                'voice_file': ('voice_sample.wav', io.BytesIO(voice_bytes), 'audio/wav')
-            }
-            data = {'text': text}
-            
-            # Make request to TTS server
-            response = requests.post(f"{server_url}/single-speaker", files=files, data=data, timeout=30)
-            
-            if response.ok:
-                audio_data = base64.b64encode(response.content).decode('utf-8')
-                return {
-                    "success": True,
-                    "audio_data": audio_data,
-                    "content_type": response.headers.get('content-type', 'audio/wav')
-                }
-            else:
-                return {
-                    "success": False,
-                    "error": f"Server error: {response.status_code} - {response.text}"
-                }
-                
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    
-    def cleanup(self):
-        """Cleanup resources"""
-        self.stop_virtual_mic_streaming()
-        self.virtual_audio.cleanup()
-        
+       
 class Api:
     def __init__(self):
         self._active_runpod_instance: Optional[Dict[str, str]] = None
         self.local_server_manager = LocalServerManager(self.send_progress_to_js)
-        self.tts_api = TTSStreamingAPI()
         self.window = None
         self._setup_thread: Optional[threading.Thread] = None
 
@@ -923,30 +893,12 @@ class Api:
                 "error": str(e)
             }
             
-    def generate_tts(self, request_data):
-        """Original TTS generation (non-streaming)"""
-        return self.tts_api.generate_tts(request_data)
-    
-    def get_streaming_status(self):
-        """
-        Get current streaming status
-        
-        Returns:
-            dict: {
-                "success": bool,
-                "streaming_active": bool,
-                "has_stream": bool
-            }
-        """
-        return self.tts_api.get_streaming_status()
-    
     def cleanup_on_exit(self):
         """
         Cleanup when app is closing
         Called automatically on window close
         """
         print("🧹 Cleaning up TTS API resources...")
-        self.tts_api.cleanup()
         return {"success": True, "message": "Cleanup completed"}
 
 def on_closing():
@@ -1015,7 +967,7 @@ if __name__ == '__main__':
         
         # Create window with proper configuration
         window = webview.create_window(
-            'DeepFak3r Voice App',
+            'DeepFak3r VibeVoice',
             'out/index.html',
             js_api=api,
             width=1200,
@@ -1035,7 +987,7 @@ if __name__ == '__main__':
         
         # Start the webview
         logger.info("Starting webview application...")
-        webview.start(debug=False)
+        webview.start(debug=True)
         
     except Exception as e:
         logger.error(f"Failed to start application: {e}", exc_info=True)

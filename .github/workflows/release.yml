@@ -1,4 +1,4 @@
-name: Build and Release Executables
+name: Build and Release Signed Executables
 
 on:
   push:
@@ -27,7 +27,7 @@ jobs:
           prerelease: false
 
   build-macos:
-    name: Build macOS Universal DMG
+    name: Build and Sign macOS Universal DMG
     needs: create-release
     runs-on: macos-latest
     steps:
@@ -48,7 +48,31 @@ jobs:
 
       - name: Build with PyInstaller for Universal2
         run: |
-          pyinstaller --onefile --windowed --name DeepFak3rVoiceApp --icon app.icns --add-data 'out:out' --target-arch universal2 main.py
+          pyinstaller --onefile --windowed --name DeepFak3rVoice --icon app.icns --add-data 'out:out' --target-arch universal2 main.py
+
+      - name: Sign macOS App
+        # This step decodes the certificate, imports it into a temporary keychain,
+        # signs the app, and then cleans up.
+        run: |
+          echo "${{ secrets.SIGNING_CERTIFICATE_BASE64 }}" | base64 --decode > certificate.pfx
+          KEYCHAIN_PASSWORD="${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+
+          security import certificate.pfx -k build.keychain -P "$KEYCHAIN_PASSWORD" -T /usr/bin/codesign
+
+          # Find the identity for signing
+          IDENTITY=$(security find-identity -v -p codesigning build.keychain | head -n 1 | sed -e 's/^[^(]*("\(.*\)")/\1/' | sed 's/"//g')
+          echo "Signing with identity: $IDENTITY"
+
+          codesign --force --deep --sign "$IDENTITY" --options runtime --timestamp "dist/DeepFak3rVoice.app"
+
+          security delete-keychain build.keychain
+        env:
+          SIGNING_CERTIFICATE_BASE64: ${{ secrets.SIGNING_CERTIFICATE_BASE64 }}
+          SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}
 
       - name: Install create-dmg
         run: brew install create-dmg
@@ -56,17 +80,17 @@ jobs:
       - name: Create DMG
         run: |
           mkdir -p dist/dmg
-          cp -r dist/DeepFak3rVoiceApp.app dist/dmg/
+          cp -r dist/DeepFak3rVoice.app dist/dmg/
           create-dmg \
-            --volname "DeepFak3rVoiceApp" \
+            --volname "DeepFak3rVoice" \
             --volicon "app.icns" \
             --window-pos 200 120 \
             --window-size 600 300 \
             --icon-size 100 \
-            --icon "DeepFak3rVoiceApp.app" 175 120 \
-            --hide-extension "DeepFak3rVoiceApp.app" \
+            --icon "DeepFak3rVoice.app" 175 120 \
+            --hide-extension "DeepFak3rVoice.app" \
             --app-drop-link 425 120 \
-            "dist/DeepFak3rVoiceApp-universal.dmg" \
+            "dist/DeepFak3rVoice-universal.dmg" \
             "dist/dmg/"
 
       - name: Upload Release Asset
@@ -75,12 +99,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: dist/DeepFak3rVoiceApp-universal.dmg
-          asset_name: DeepFak3rVoiceApp-macOS-universal.dmg
+          asset_path: dist/DeepFak3rVoice-universal.dmg
+          asset_name: DeepFak3rVoice-macOS-universal.dmg
           asset_content_type: application/octet-stream
 
   build-windows:
-    name: Build Windows EXE
+    name: Build and Sign Windows EXE
     needs: create-release
     runs-on: windows-latest
     steps:
@@ -98,7 +122,24 @@ jobs:
 
       - name: Build with PyInstaller
         run: |
-          pyinstaller --onefile --windowed --name DeepFak3rVoiceApp --icon app.ico --add-data "out;out" main.py
+          pyinstaller --onefile --windowed --name DeepFak3rVoice --icon app.ico --add-data "out;out" main.py
+
+      - name: Sign Windows Executable
+        # This step finds signtool.exe, decodes the certificate, and signs the EXE
+        # with a trusted timestamp.
+        run: |
+          $cert_pfx_path = "certificate.pfx"
+          [IO.File]::WriteAllBytes($cert_pfx_path, [System.Convert]::FromBase64String("${{ secrets.SIGNING_CERTIFICATE_BASE64 }}"))
+
+          # Find the latest Windows SDK path for signtool
+          $sdk_dir = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Filter "signtool.exe" -Recurse | Select-Object -Last 1).DirectoryName
+          $signtool_path = Join-Path $sdk_dir "signtool.exe"
+
+          & $signtool_path sign /f $cert_pfx_path /p "${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}" /tr http://timestamp.digicert.com /td sha256 /fd sha256 "dist/DeepFak3rVoice.exe"
+        shell: pwsh
+        env:
+          SIGNING_CERTIFICATE_BASE64: ${{ secrets.SIGNING_CERTIFICATE_BASE64 }}
+          SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}
 
       - name: Upload Release Asset
         uses: actions/upload-release-asset@v1
@@ -106,6 +147,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: dist/DeepFak3rVoiceApp.exe
-          asset_name: DeepFak3rVoiceApp.exe
+          asset_path: dist/DeepFak3rVoice.exe
+          asset_name: DeepFak3rVoice.exe
           asset_content_type: application/vnd.microsoft.portable-executable
