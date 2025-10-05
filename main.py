@@ -156,7 +156,7 @@ class RunPodManager:
                     "name": instance_name,
                     "imageName": "spruceemma/vibevoice-server:latest",
                     "dockerArgs": "",
-                    "ports": "8000/http",
+                    "ports": "8000/tcp",
                     "volumeMountPath": "/workspace",
                 }
             }
@@ -179,7 +179,7 @@ class RunPodManager:
             })
             raise
 
-    def _wait_for_server_ready(self, pod_id: str, timeout=300) -> str:
+    def _wait_for_server_ready(self, pod_id: str, timeout=600) -> str:
             """Waits for the pod to become ready and return its public URL."""
             start_time = time.time()
             get_pod_query = """
@@ -228,10 +228,10 @@ class RunPodManager:
                 if ports:
                     http_port = next((p for p in ports if p.get("privatePort") == 8000 and p.get("isIpPublic")), None)
                     if http_port:
-                        url = f"https://{http_port['ip']}:{http_port['publicPort']}"
+                        url = f"http://{http_port['ip']}:{http_port['publicPort']}"
                         try:
                             response = requests.get(f"{url}/health", timeout=5)
-                            if response.ok and response.json().get("status") == "healthy":
+                            if response.ok:
                                 logger.info(f"RunPod server is healthy at {url}")
                                 return url
                         except requests.RequestException:
@@ -698,7 +698,7 @@ class LocalServerManager:
         except Exception as e:
             logger.warning(f"Failed to kill existing server: {e}")
 
-    def _wait_for_server_ready(self, timeout=60):
+    def _wait_for_server_ready(self, timeout=600):
         """Wait for server to be ready with health checks."""
         start_time = time.time()
         
@@ -1240,7 +1240,7 @@ if __name__ == '__main__':
         
         # Start the webview
         logger.info("Starting webview application...")
-        webview.start(debug=True)
+        webview.start(debug=False)
         
     except Exception as e:
         logger.error(f"Failed to start application: {e}", exc_info=True)
