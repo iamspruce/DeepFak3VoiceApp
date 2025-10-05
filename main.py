@@ -30,6 +30,217 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+class RunPodManager:
+    """Manages RunPod deployments from the Python backend."""
+    def __init__(self, api_key: str, progress_callback):
+        self.api_key = api_key
+        self.progress_callback = progress_callback
+        self.base_url = "https://api.runpod.io/graphql"
+
+    def _graphql_request(self, query: str, variables: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Performs a GraphQL request to the RunPod API."""
+        try:
+            response = requests.post(
+                self.base_url,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.api_key}",
+                },
+                json={"query": query, "variables": variables},
+                timeout=30
+            )
+            response.raise_for_status()
+            data = response.json()
+            if "errors" in data:
+                # Log the full error details
+                logger.error(f"RunPod GraphQL errors: {json.dumps(data['errors'], indent=2)}")
+                raise Exception(f"RunPod GraphQL error: {data['errors'][0]['message']}")
+            return data.get("data", {})
+        except requests.exceptions.RequestException as e:
+            logger.error(f"RunPod API request failed: {e}")
+            # Log response body if available
+            if hasattr(e.response, 'text'):
+                logger.error(f"Response body: {e.response.text}")
+            raise
+    
+    def validate_api_key(self) -> bool:
+        """Validates the RunPod API key."""
+        query = """
+        query {
+            myself {
+                id
+                clientBalance
+            }
+        }
+        """
+        try:
+            data = self._graphql_request(query)
+            balance = data.get("myself", {}).get("currentBalance", 0)
+            logger.info(f"RunPod account balance: ${balance}")
+            return True
+        except Exception as e:
+            logger.error(f"API key validation failed: {e}")
+            return False
+
+    def get_available_gpus(self):
+        """Fetches available GPU types suitable for the TTS server."""
+        query = """
+        query {
+            gpuTypes {
+                id
+                displayName
+                memoryInGb
+                secureCloud
+                lowestPrice(input: {gpuCount: 1}) { uninterruptablePrice }
+            }
+        }
+        """
+        gpus = self._graphql_request(query).get("gpuTypes", [])
+        
+        # Filter for GPUs with >= 24GB VRAM, secure cloud, and in stock
+        suitable_gpus = [
+            gpu for gpu in gpus
+            if gpu.get("memoryInGb", 0) >= 24
+            and gpu.get("secureCloud")
+            
+        ]
+        return suitable_gpus
+
+    def _select_optimal_gpu(self, gpu_types):
+        """Selects the best GPU based on a scoring system (cost/performance)."""
+        return min(gpu_types, key=lambda gpu: gpu['lowestPrice']['uninterruptablePrice'])
+
+    def deploy_tts_server(self, instance_name: str) -> Dict[str, Any]:
+        """Orchestrates the deployment of the TTS server on RunPod."""
+        try:
+            self.progress_callback({
+                "stage": "validating", "progress": 10, "message": "Validating API key..."
+            })
+            if not self.validate_api_key():
+                raise ValueError("Invalid RunPod API key or insufficient credits")
+
+            self.progress_callback({
+                "stage": "validating", "progress": 20, "message": "Finding available GPUs..."
+            })
+            gpu_types = self.get_available_gpus()
+            if not gpu_types:
+                raise RuntimeError("No suitable GPU types available (24GB+ VRAM required)")
+
+            selected_gpu = self._select_optimal_gpu(gpu_types)
+            self.progress_callback({
+                "stage": "creating", "progress": 40,
+                "message": f"Deploying on {selected_gpu['displayName']}..."
+            })
+
+            # Create Pod
+            create_mutation = """
+            mutation createPod($input: PodFindAndDeployOnDemandInput!) {
+                podFindAndDeployOnDemand(input: $input) {
+                    id
+                    imageName
+                    machine {
+                        podHostId
+                    }
+                }
+            }
+            """
+            variables = {
+                "input": {
+                    "cloudType": "SECURE",
+                    "gpuCount": 1,
+                    "volumeInGb": 100,
+                    "containerDiskInGb": 50,
+                    "minVcpuCount": 4,
+                    "minMemoryInGb": 16,
+                    "gpuTypeId": selected_gpu["id"],
+                    "name": instance_name,
+                    "imageName": "spruceemma/vibevoice-server:latest",
+                    "dockerArgs": "",
+                    "ports": "8000/http",
+                    "volumeMountPath": "/workspace",
+                }
+            }
+            result = self._graphql_request(create_mutation, variables)
+            pod_id = result["podFindAndDeployOnDemand"]["id"]
+
+            server_url = self._wait_for_server_ready(pod_id)
+
+            self.progress_callback({
+                "stage": "ready", "progress": 100, "message": "Server is ready!",
+                "podId": pod_id, "url": server_url
+            })
+            return {"podId": pod_id, "url": server_url}
+
+        except Exception as e:
+            logger.error(f"RunPod deployment failed: {e}", exc_info=True)
+            self.progress_callback({
+                "stage": "error", "progress": 0, "message": "Deployment failed",
+                "error": str(e)
+            })
+            raise
+
+    def _wait_for_server_ready(self, pod_id: str, timeout=300) -> str:
+            """Waits for the pod to become ready and return its public URL."""
+            start_time = time.time()
+            get_pod_query = """
+            query getPod($podId: String!) {
+                pod(input: {podId: $podId}) {
+                    runtime {
+                        ports { ip isIpPublic privatePort publicPort }
+                    }
+                }
+            }
+            """
+            
+            while time.time() - start_time < timeout:
+                progress = min(60 + int((time.time() - start_time) / timeout * 35), 95)
+                self.progress_callback({
+                    "stage": "starting", "progress": progress, "podId": pod_id,
+                    "message": f"Waiting for server to start... ({int(time.time() - start_time)}s)"
+                })
+                
+                pod_data = self._graphql_request(get_pod_query, {"podId": pod_id})
+                logging.info(f"Pod data: {json.dumps(pod_data, indent=2)}")
+                
+                if pod_data is None:
+                    logger.warning(f"Pod data is None for pod {pod_id}, retrying...")
+                    time.sleep(5)
+                    continue
+                
+                pod_obj = pod_data.get("pod")
+                if pod_obj is None:
+                    logger.info(f"Pod {pod_id} not yet available, retrying...")
+                    time.sleep(5)
+                    continue
+                
+                # Safely get the runtime object
+                runtime_info = pod_obj.get("runtime")
+                
+                # Check if runtime info is available yet. If not, continue waiting.
+                if not runtime_info:
+                    logger.info(f"Pod {pod_id} runtime not yet initialized, retrying...")
+                    time.sleep(5)
+                    continue
+
+                # Now we can safely get the ports
+                ports = runtime_info.get("ports", [])
+                
+                if ports:
+                    http_port = next((p for p in ports if p.get("privatePort") == 8000 and p.get("isIpPublic")), None)
+                    if http_port:
+                        url = f"https://{http_port['ip']}:{http_port['publicPort']}"
+                        try:
+                            response = requests.get(f"{url}/health", timeout=5)
+                            if response.ok and response.json().get("status") == "healthy":
+                                logger.info(f"RunPod server is healthy at {url}")
+                                return url
+                        except requests.RequestException:
+                            pass # Ignore connection errors while waiting
+                
+                time.sleep(5)
+                
+            raise TimeoutError("Server failed to become ready within the timeout period.")
+
 class LocalServerManager:
     def __init__(self, progress_callback):
         self.progress_callback = progress_callback
@@ -81,11 +292,11 @@ class LocalServerManager:
         """Get installation directory with proper permissions."""
         if os_name == "windows":
             base_dir = os.environ.get('LOCALAPPDATA', os.path.expanduser('~\\AppData\\Local'))
-            install_dir = os.path.join(base_dir, 'DeepFak3rTTSServer')
+            install_dir = os.path.join(base_dir, 'DeepFak3rVibeVoiceServer')
         elif os_name == "macos":
-            install_dir = os.path.expanduser('~/Applications/DeepFak3rTTSServer')
+            install_dir = os.path.expanduser('~/Applications/DeepFak3rVibeVoiceServer')
         else:  # linux
-            install_dir = os.path.expanduser('~/.local/share/deepfak3r-tts-server')
+            install_dir = os.path.expanduser('~/.local/share/deepfak3r-vibevoice-server')
         
         # Ensure directory exists and is writable
         Path(install_dir).mkdir(parents=True, exist_ok=True)
@@ -98,9 +309,8 @@ class LocalServerManager:
     def _get_download_url(self, os_name, arch):
         """Get download URL with fallback options."""
         base_url = f"https://github.com/{self.github_repo}/releases/latest/download"
-        filename = f"vibevoice-server-{os_name}-{arch}"
+        filename = f"vibevoice-{os_name}-{arch}"
         ext = "zip" if os_name == "windows" else "tar.gz"
-        
         return f"{base_url}/{filename}.{ext}", f"{filename}.{ext}"
 
     def _verify_download(self, file_path, expected_checksum=None):
@@ -533,6 +743,7 @@ class Api:
         self.local_server_manager = LocalServerManager(self.send_progress_to_js)
         self.window = None
         self._setup_thread: Optional[threading.Thread] = None
+        self._runpod_thread: Optional[threading.Thread] = None
 
     def set_window(self, window):
         self.window = window
@@ -546,6 +757,17 @@ class Api:
                 logger.info(f"Progress update sent: {progress_data['stage']} - {progress_data['progress']}%")
         except Exception as e:
             logger.error(f"Failed to send progress to JS: {e}")
+            
+    def send_runpod_progress_to_js(self, progress_data):
+        """Sends RunPod deployment progress to the JS frontend."""
+        try:
+            if self.window:
+                # Dispatch a custom event that the React component can listen for
+                js_code = f'window.dispatchEvent(new CustomEvent("runpod-progress", {{ detail: {json.dumps(progress_data)} }}));'
+                self.window.evaluate_js(js_code)
+                logger.info(f"RunPod progress sent: {progress_data.get('stage')} - {progress_data.get('progress')}%")
+        except Exception as e:
+            logger.error(f"Failed to send RunPod progress to JS: {e}")
 
     def start_local_server_setup(self):
         """Thread-safe server setup with better error handling."""
@@ -567,6 +789,33 @@ class Api:
                 "progress": 0,
                 "message": "Failed to start setup",
                 "error": str(e)
+            })
+
+    def start_runpod_deployment(self, api_key: str):
+        """Starts the RunPod deployment process in a separate thread."""
+        if self._runpod_thread and self._runpod_thread.is_alive():
+            logger.warning("RunPod deployment already in progress.")
+            return
+
+        self._runpod_thread = threading.Thread(
+            target=self._safe_runpod_deploy_wrapper,
+            args=(api_key,),
+            daemon=True
+        )
+        self._runpod_thread.start()
+        logger.info("RunPod deployment thread started.")
+
+    def _safe_runpod_deploy_wrapper(self, api_key: str):
+        """Wrapper for RunPod deployment with error handling."""
+        try:
+            manager = RunPodManager(api_key, self.send_runpod_progress_to_js)
+            instance_name = f"vibevoice-server-{int(time.time())}"
+            manager.deploy_tts_server(instance_name)
+        except Exception as e:
+            logger.error(f"RunPod deployment failed in wrapper: {e}", exc_info=True)
+            # The manager already sends a detailed error, this is a fallback.
+            self.send_runpod_progress_to_js({
+                "stage": "error", "progress": 0, "message": "Deployment failed", "error": str(e)
             })
 
     def _safe_setup_wrapper(self):
@@ -901,7 +1150,10 @@ class Api:
         print("🧹 Cleaning up TTS API resources...")
         return {"success": True, "message": "Cleanup completed"}
 
+
+
 def on_closing():
+  
     """Enhanced application exit handler."""
     logger.info("Application is closing...")
     
@@ -928,6 +1180,7 @@ def on_closing():
     logger.info("Application shutdown complete")
 
 def terminate_runpod_instance(api_key, pod_id):
+   
     """Terminate RunPod instance via GraphQL API."""
     url = "https://api.runpod.ai/graphql"
     

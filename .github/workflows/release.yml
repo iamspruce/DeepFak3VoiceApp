@@ -54,12 +54,19 @@ jobs:
         run: |
           echo "${{ secrets.SIGNING_CERTIFICATE_BASE64 }}" | base64 --decode > certificate.pfx
 
-          # Use the environment variable directly to avoid shell interpretation issues
-          security create-keychain -p "$SIGNING_CERTIFICATE_PASSWORD" build.keychain
+          # Create keychain with password
+          security create-keychain -p "${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}" build.keychain
           security default-keychain -s build.keychain
-          security unlock-keychain -p "$SIGNING_CERTIFICATE_PASSWORD" build.keychain
+          security unlock-keychain -p "${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}" build.keychain
 
-          security import certificate.pfx -k build.keychain -P "$SIGNING_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          # Set keychain timeout to avoid locking
+          security set-keychain-settings -t 3600 -u build.keychain
+
+          # Import certificate - use the secret directly in the command
+          security import certificate.pfx -k build.keychain -P "${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}" -T /usr/bin/codesign -T /usr/bin/security
+
+          # Allow codesign to access the keychain without prompting
+          security set-key-partition-list -S apple-tool:,apple: -s -k "${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}" build.keychain
 
           IDENTITY=$(security find-identity -v -p codesigning build.keychain | head -n 1 | sed -e 's/^[^(]*("\(.*\)")/\1/' | sed 's/"//g')
           echo "Signing with identity: $IDENTITY"
