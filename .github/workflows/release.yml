@@ -52,41 +52,11 @@ jobs:
 
       - name: Sign macOS App
         run: |
-          # Decode and save the certificate
-          echo "${{ secrets.SIGNING_CERTIFICATE_BASE64 }}" | base64 --decode > certificate.pfx
+          # Use ad-hoc signing (self-signing)
+          codesign --force --deep --sign - "dist/DeepFak3rVoice.app"
 
-          # Create a temporary keychain
-          security create-keychain -p "${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}" build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p "${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}" build.keychain
-          security set-keychain-settings -t 3600 -u build.keychain
-
-          # Import the certificate into the keychain.
-          # We remove the '-T' flags as 'set-key-partition-list' is a more reliable method.
-          security import certificate.pfx -k build.keychain -P "${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}" -A
-
-          # Grant codesign access to the keychain
-          security set-key-partition-list -S apple-tool:,apple: -s -k "${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}" build.keychain
-
-          # Find the identity hash (more robust than parsing the name)
-          IDENTITY=$(security find-identity -v -p codesigning build.keychain | grep -oE '[A-F0-9]{40}' | head -n 1)
-          echo "Signing with identity: $IDENTITY"
-
-          # Check if identity was found
-          if [ -z "$IDENTITY" ]; then
-            echo "Error: No valid signing identity found."
-            security find-identity -v build.keychain # Print all identities for debugging
-            exit 1
-          fi
-
-          # Sign the application
-          codesign --force --deep --sign "$IDENTITY" --options runtime --timestamp "dist/DeepFak3rVoice.app"
-
-          # Clean up
-          security delete-keychain build.keychain
-        env:
-          SIGNING_CERTIFICATE_BASE64: ${{ secrets.SIGNING_CERTIFICATE_BASE64 }}
-          SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}
+          # Verify the signature
+          codesign --verify --verbose=4 "dist/DeepFak3rVoice.app"
 
       - name: Install create-dmg
         run: brew install create-dmg
