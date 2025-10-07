@@ -16,7 +16,8 @@ import hashlib
 import logging
 import time
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import List, Optional, Dict, Any
+import atexit
 
 
 # Setup logging
@@ -29,6 +30,419 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+class HardwareDetector:
+    """Detects system hardware with robust multi-vendor GPU support."""
+    
+    # Performance scores for AI workloads (relative scale 0-100)
+    GPU_PERFORMANCE_DB = {
+        # NVIDIA RTX 50 Series (2025)
+        "rtx 5090": 100, "rtx 5080": 85, "rtx 5070 ti": 79,
+        "rtx 5070": 68, "rtx 5060 ti": 54, "rtx 5060": 45,
+        
+        # NVIDIA RTX 40 Series
+        "rtx 4090": 95, "rtx 4080 super": 83, "rtx 4080": 82,
+        "rtx 4070 ti super": 74, "rtx 4070 ti": 71, "rtx 4070 super": 67,
+        "rtx 4070": 63, "rtx 4060 ti": 55, "rtx 4060": 50,
+        
+        # NVIDIA RTX 30 Series
+        "rtx 3090 ti": 88, "rtx 3090": 85, "rtx 3080 ti": 80,
+        "rtx 3080": 75, "rtx 3070 ti": 65, "rtx 3070": 60,
+        "rtx 3060 ti": 52, "rtx 3060": 45,
+        
+        # AMD RX 9000 Series (2025)
+        "rx 9070 xt": 80, "rx 9070": 75, "rx 9060 xt": 60,
+        
+        # AMD RX 7000/8000 Series
+        "rx 7900 xtx": 85, "rx 7900 xt": 80, "rx 7900 gre": 75,
+        "rx 7800 xt": 70, "rx 7700 xt": 60, "rx 7600 xt": 55, "rx 7600": 48,
+        
+        # AMD RX 6000 Series
+        "rx 6900 xt": 78, "rx 6800 xt": 72, "rx 6800": 68,
+        "rx 6700 xt": 58, "rx 6600 xt": 48, "rx 6600": 42,
+        
+        # Intel Arc Battlemage (2025)
+        "arc b580": 50, "arc b570": 45, "arc b560": 40,
+        
+        # Intel Arc Alchemist
+        "arc a770": 52, "arc a750": 48, "arc a580": 42,
+        
+        # Apple Silicon (unified memory architecture)
+        "apple m4 max": 75, "apple m4 pro": 70, "apple m4": 60,
+        "apple m3 max": 72, "apple m3 pro": 65, "apple m3": 55,
+        "apple m2 ultra": 80, "apple m2 max": 70, "apple m2 pro": 65, "apple m2": 50,
+        "apple m1 ultra": 75, "apple m1 max": 68, "apple m1 pro": 60, "apple m1": 50,
+    }
+    
+    def detect_hardware(self) -> Dict[str, Any]:
+        """Detect system hardware and return comprehensive information."""
+        os_name, arch = self._get_os_arch()
+        logger.info(f"Detecting hardware on {os_name}/{arch}")
+        
+        gpus = []
+        
+        try:
+            if os_name in ["windows", "linux"]:
+                gpus.extend(self._detect_nvidia_gpu())
+                gpus.extend(self._detect_amd_gpu())
+                gpus.extend(self._detect_intel_gpu())
+            elif os_name == "macos":
+                gpus.extend(self._detect_apple_silicon())
+        except Exception as e:
+            logger.error(f"Hardware detection error: {e}", exc_info=True)
+        
+        # Remove duplicates (same model detected by multiple methods)
+        gpus = self._deduplicate_gpus(gpus)
+        
+        # Calculate totals
+        total_vram = sum(gpu["vramGB"] for gpu in gpus)
+        has_gpu = len(gpus) > 0
+        
+        # Determine recommended setup based on capabilities
+        recommended_setup = self._determine_setup(has_gpu, total_vram, gpus)
+        
+        result = {
+            "os": os_name,
+            "arch": arch,
+            "hasGPU": has_gpu,
+            "gpus": gpus,
+            "totalVRAM": round(total_vram, 1),
+            "recommendedSetup": recommended_setup
+        }
+        
+        logger.info(f"Hardware detection complete: {len(gpus)} GPU(s), {total_vram:.1f}GB VRAM")
+        return result
+    
+    def _detect_nvidia_gpu(self) -> List[Dict[str, Any]]:
+        """Detect NVIDIA GPUs using nvidia-smi."""
+        gpus = []
+        try:
+            result = subprocess.run(
+                ['nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader,nounits'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                for line in result.stdout.strip().split('\n'):
+                    if ',' in line:
+                        name, vram_mb = line.split(',', 1)
+                        model = self._normalize_gpu_name(name.strip(), "nvidia")
+                        
+                        try:
+                            vram_gb = float(vram_mb.strip()) / 1024
+                        except ValueError:
+                            logger.warning(f"Could not parse VRAM for {name}")
+                            continue
+                        
+                        perf_score = self._get_performance_score(model)
+                        
+                        gpus.append({
+                            "vendor": "nvidia",
+                            "model": model,
+                            "vramGB": round(vram_gb, 1),
+                            "isSupported": vram_gb >= 6,
+                            "performanceScore": perf_score
+                        })
+                        logger.debug(f"Detected NVIDIA GPU: {model} ({vram_gb:.1f}GB)")
+        except FileNotFoundError:
+            logger.debug("nvidia-smi not found")
+        except subprocess.TimeoutExpired:
+            logger.warning("nvidia-smi timed out")
+        except Exception as e:
+            logger.error(f"NVIDIA detection error: {e}")
+        
+        return gpus
+    
+    def _detect_amd_gpu(self) -> List[Dict[str, Any]]:
+        """Detect AMD GPUs using rocm-smi."""
+        gpus = []
+        try:
+            result = subprocess.run(
+                ['rocm-smi', '--showproductname', '--showmeminfo', 'vram'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.split('\n')
+                current_gpu = {}
+                
+                for line in lines:
+                    line_lower = line.lower()
+                    
+                    # Extract GPU name
+                    if 'gpu' in line_lower and 'product name' in line_lower and ':' in line:
+                        model_text = line.split(':', 1)[1].strip()
+                        model = self._normalize_gpu_name(model_text, "amd")
+                        current_gpu['model'] = model
+                    
+                    # Extract VRAM
+                    if 'vram total' in line_lower or 'memory total' in line_lower:
+                        vram_match = re.search(r'(\d+)\s*(mb|gb)', line_lower)
+                        if vram_match:
+                            vram_value = float(vram_match.group(1))
+                            unit = vram_match.group(2)
+                            vram_gb = vram_value / 1024 if unit == 'mb' else vram_value
+                            current_gpu['vram'] = vram_gb
+                    
+                    # When we have both model and VRAM, add the GPU
+                    if 'model' in current_gpu and 'vram' in current_gpu:
+                        perf_score = self._get_performance_score(current_gpu['model'])
+                        gpus.append({
+                            "vendor": "amd",
+                            "model": current_gpu['model'],
+                            "vramGB": round(current_gpu['vram'], 1),
+                            "isSupported": current_gpu['vram'] >= 6,
+                            "performanceScore": perf_score
+                        })
+                        logger.debug(f"Detected AMD GPU: {current_gpu['model']} ({current_gpu['vram']:.1f}GB)")
+                        current_gpu = {}  # Reset for next GPU
+                        
+        except FileNotFoundError:
+            logger.debug("rocm-smi not found")
+        except subprocess.TimeoutExpired:
+            logger.warning("rocm-smi timed out")
+        except Exception as e:
+            logger.error(f"AMD detection error: {e}")
+        
+        return gpus
+    
+    def _detect_intel_gpu(self) -> List[Dict[str, Any]]:
+        """Detect Intel Arc GPUs."""
+        gpus = []
+        
+        # Try xpu-smi first (newer Intel tool)
+        try:
+            result = subprocess.run(
+                ['xpu-smi', 'discovery'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0 and 'arc' in result.stdout.lower():
+                lines = result.stdout.split('\n')
+                for i, line in enumerate(lines):
+                    if 'device name' in line.lower() and ':' in line:
+                        model_text = line.split(':', 1)[1].strip()
+                        model = self._normalize_gpu_name(model_text, "intel")
+                        
+                        # Try to find VRAM in nearby lines
+                        vram_gb = 8.0  # Default for Arc cards
+                        for j in range(max(0, i-3), min(len(lines), i+4)):
+                            vram_match = re.search(r'(\d+)\s*(gb|mb)', lines[j].lower())
+                            if vram_match and 'memory' in lines[j].lower():
+                                vram_value = float(vram_match.group(1))
+                                unit = vram_match.group(2)
+                                vram_gb = vram_value / 1024 if unit == 'mb' else vram_value
+                                break
+                        
+                        perf_score = self._get_performance_score(model)
+                        gpus.append({
+                            "vendor": "intel",
+                            "model": model,
+                            "vramGB": round(vram_gb, 1),
+                            "isSupported": vram_gb >= 6,
+                            "performanceScore": perf_score
+                        })
+                        logger.debug(f"Detected Intel GPU: {model} ({vram_gb:.1f}GB)")
+        except FileNotFoundError:
+            logger.debug("xpu-smi not found, trying clinfo")
+        except Exception as e:
+            logger.debug(f"xpu-smi detection failed: {e}")
+        
+        # Fallback to clinfo
+        if not gpus:
+            try:
+                result = subprocess.run(
+                    ['clinfo'],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                
+                if result.returncode == 0 and 'intel' in result.stdout.lower():
+                    model_match = re.search(r'intel.*arc\s+([^\n]+)', result.stdout.lower())
+                    if model_match:
+                        model = self._normalize_gpu_name(f"arc {model_match.group(1)}", "intel")
+                        vram_gb = 8.0  # Default
+                        
+                        perf_score = self._get_performance_score(model)
+                        gpus.append({
+                            "vendor": "intel",
+                            "model": model,
+                            "vramGB": vram_gb,
+                            "isSupported": True,
+                            "performanceScore": perf_score
+                        })
+                        logger.debug(f"Detected Intel GPU via clinfo: {model}")
+            except FileNotFoundError:
+                logger.debug("clinfo not found")
+            except Exception as e:
+                logger.debug(f"clinfo detection failed: {e}")
+        
+        return gpus
+    
+    def _detect_apple_silicon(self) -> List[Dict[str, Any]]:
+        """Detect Apple Silicon chips."""
+        gpus = []
+        try:
+            # Get chip model
+            result = subprocess.run(
+                ['sysctl', '-n', 'machdep.cpu.brand_string'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            
+            if result.returncode == 0:
+                chip_name = result.stdout.strip().lower()
+                model = self._normalize_gpu_name(chip_name, "apple")
+                
+                # Get total system memory (unified memory architecture)
+                mem_result = subprocess.run(
+                    ['sysctl', '-n', 'hw.memsize'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                
+                vram_gb = 8.0  # Default
+                if mem_result.returncode == 0:
+                    try:
+                        mem_bytes = int(mem_result.stdout.strip())
+                        vram_gb = mem_bytes / (1024 ** 3)
+                    except ValueError:
+                        pass
+                
+                perf_score = self._get_performance_score(model)
+                gpus.append({
+                    "vendor": "apple",
+                    "model": model,
+                    "vramGB": round(vram_gb, 1),
+                    "isSupported": True,  # Apple Silicon always supported
+                    "performanceScore": perf_score
+                })
+                logger.debug(f"Detected Apple Silicon: {model} ({vram_gb:.1f}GB unified memory)")
+                
+        except Exception as e:
+            logger.error(f"Apple Silicon detection error: {e}")
+        
+        return gpus
+    
+    def _normalize_gpu_name(self, name: str, vendor: str) -> str:
+        """Normalize GPU model names for consistent matching."""
+        name = name.lower().strip()
+        
+        # Remove common prefixes
+        prefixes = [
+            'nvidia', 'geforce', 'amd', 'radeon', 'intel', 'apple', 
+            'graphics', 'gpu', 'chip'
+        ]
+        for prefix in prefixes:
+            name = re.sub(rf'\b{prefix}\b', '', name, flags=re.IGNORECASE)
+        
+        # Clean up whitespace
+        name = ' '.join(name.split())
+        
+        # Vendor-specific normalization
+        if vendor == "amd":
+            # "Radeon RX 7900 XTX" -> "rx 7900 xtx"
+            name = re.sub(r'\brx\s*', 'rx ', name)
+        elif vendor == "intel":
+            # Ensure "arc" prefix
+            if 'arc' not in name and any(x in name for x in ['a770', 'a750', 'a580', 'b580', 'b570', 'b560']):
+                name = 'arc ' + name
+        elif vendor == "apple":
+            # Extract M-series chip version
+            m_match = re.search(r'm\d+\s*(ultra|max|pro)?', name)
+            if m_match:
+                name = f"apple {m_match.group(0).strip()}"
+            else:
+                name = f"apple {name}"
+        
+        return name.strip()
+    
+    def _get_performance_score(self, model: str) -> int:
+        """Get performance score for a GPU model."""
+        # Try exact match first
+        if model in self.GPU_PERFORMANCE_DB:
+            return self.GPU_PERFORMANCE_DB[model]
+        
+        # Try fuzzy matching for close variants
+        model_base = model.split()[0] if ' ' in model else model
+        for db_model, score in self.GPU_PERFORMANCE_DB.items():
+            if model_base in db_model or db_model in model:
+                return score
+        
+        # Default score for unknown GPUs
+        return 50
+    
+    def _deduplicate_gpus(self, gpus: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Remove duplicate GPU entries."""
+        seen = set()
+        unique_gpus = []
+        
+        for gpu in gpus:
+            key = (gpu["vendor"], gpu["model"], gpu["vramGB"])
+            if key not in seen:
+                seen.add(key)
+                unique_gpus.append(gpu)
+        
+        return unique_gpus
+    
+    def _determine_setup(self, has_gpu: bool, total_vram: float, gpus: List[Dict[str, Any]]) -> str:
+        """Determine recommended AI setup based on hardware."""
+        if not has_gpu:
+            return "runpod"  # No GPU -> cloud recommended
+        
+        # Check if any GPU is high-performance
+        max_perf = max((gpu["performanceScore"] for gpu in gpus), default=0)
+        
+        if total_vram >= 16 and max_perf >= 60:
+            return "local"  # Strong GPU -> local recommended
+        elif total_vram >= 8 and max_perf >= 45:
+            return "local"  # Decent GPU -> local possible
+        elif total_vram >= 6:
+            return "runpod"  # Weak GPU -> cloud recommended
+        else:
+            return "runpod"  # Insufficient VRAM
+    
+    def _get_os_arch(self) -> tuple[str, str]:
+        """Get normalized OS and architecture."""
+        os_name = platform.system().lower()
+        arch = platform.machine().lower()
+
+        # Normalize OS name
+        if os_name == "darwin":
+            os_name = "macos"
+        elif os_name not in ["windows", "linux"]:
+            os_name = "linux"  # Default fallback
+
+        # Detect real arch on Apple Silicon Macs (even under Rosetta)
+        if os_name == "macos" and arch == "x86_64":
+            try:
+                # sysctl check: if returns 1, it's running under Rosetta on Apple Silicon
+                output = subprocess.check_output(["sysctl", "-in", "sysctl.proc_translated"])
+                if output.strip() == b"1":
+                    arch = "arm64"
+            except Exception:
+                pass
+
+        # Normalize architecture
+        if arch in ["x86_64", "amd64"]:
+            arch = "x64"
+        elif arch in ["arm64", "aarch64"]:
+            arch = "arm64"
+        elif arch in ["i386", "i686"]:
+            arch = "x86"
+        else:
+            arch = "x64"  # Default fallback
+
+        return os_name, arch
 
 class RunPodManager:
     """Manages RunPod deployments from the Python backend."""
@@ -247,6 +661,7 @@ class LocalServerManager:
         self.server_process = None
         self.log_file = None
         self.setup_cancelled = False
+        self._lock = threading.Lock()
         
         # Configuration
         self.github_repo = "iamspruce/deepfak3voice"  
@@ -259,10 +674,14 @@ class LocalServerManager:
         self.config_path = os.path.join(self.install_path, "config.json")
         self.log_path = os.path.join(self.install_path, "server.log")
         
+        # Register cleanup on exit
+        atexit.register(self._cleanup_resources)
+        
     def cancel_setup(self):
         """Cancel ongoing setup."""
-        self.setup_cancelled = True
-        logger.info("Setup cancellation requested")
+        with self._lock:
+            self.setup_cancelled = True
+            logger.info("Setup cancellation requested")
 
     def _get_os_arch(self):
         """Enhanced OS/arch detection."""
@@ -277,7 +696,7 @@ class LocalServerManager:
 
         # Normalize architecture
         if arch in ["x86_64", "amd64"]: 
-            arch = "x64"
+            arch = "amd64"
         elif arch in ["arm64", "aarch64"]: 
             arch = "arm64"
         elif arch in ["i386", "i686"]:
@@ -334,8 +753,10 @@ class LocalServerManager:
     def setup_server(self):
         """Enhanced server setup with comprehensive error handling."""
         try:
-            if self.setup_cancelled:
-                return
+            with self._lock:
+                if self.setup_cancelled:
+                    logger.info("Setup cancelled before starting")
+                    return
 
             logger.info(f"Setting up server for {self.os_name}-{self.arch} in {self.install_path}")
 
@@ -361,8 +782,10 @@ class LocalServerManager:
             logger.info(f"Downloading from: {download_url}")
             self._download_with_progress(download_url, archive_path)
             
-            if self.setup_cancelled:
-                return
+            with self._lock:
+                if self.setup_cancelled:
+                    self._cleanup_partial_download(archive_path)
+                    return
 
             # Verify download
             self._verify_download(archive_path)
@@ -370,17 +793,16 @@ class LocalServerManager:
             # Extract
             self._extract_with_progress(archive_path, self.install_path)
             
-            if self.setup_cancelled:
-                return
+            with self._lock:
+                if self.setup_cancelled:
+                    self._cleanup_partial_download(archive_path)
+                    return
 
-            # Find the executable after extraction (might be in subdirectory)
+            # Find the executable after extraction
             self._locate_executable()
 
-            # Cleanup
-            try:
-                os.remove(archive_path)
-            except Exception as e:
-                logger.warning(f"Failed to remove archive: {e}")
+            # Cleanup archive
+            self._safe_remove(archive_path)
 
             # Make executable (Unix-like systems)
             if self.os_name != "windows":
@@ -397,6 +819,25 @@ class LocalServerManager:
                 "message": "Setup failed",
                 "error": str(e)
             })
+
+    def _cleanup_partial_download(self, archive_path):
+        """Clean up partially downloaded files."""
+        logger.info("Cleaning up partial download")
+        self._safe_remove(archive_path)
+        self.progress_callback({
+            "stage": "error",
+            "progress": 0,
+            "message": "Setup cancelled by user"
+        })
+
+    def _safe_remove(self, file_path):
+        """Safely remove a file."""
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                logger.info(f"Removed: {file_path}")
+        except Exception as e:
+            logger.warning(f"Failed to remove {file_path}: {e}")
 
     def _locate_executable(self):
         """Find the executable after extraction (handles subdirectories)."""
@@ -416,8 +857,9 @@ class LocalServerManager:
 
     def check_server_status(self) -> Dict[str, Any]:
         """Get comprehensive server status information."""
-        is_installed = os.path.exists(self.executable_path)
-        is_running = self.server_process is not None and self.server_process.poll() is None
+        with self._lock:
+            is_installed = os.path.exists(self.executable_path)
+            is_running = self.server_process is not None and self.server_process.poll() is None
         
         # Get version if installed
         version = None
@@ -455,7 +897,6 @@ class LocalServerManager:
     def _test_existing_installation(self, executable_path):
         """Test if existing installation works."""
         try:
-            # Try to run with --version flag
             result = subprocess.run(
                 [executable_path, "--version"],
                 capture_output=True,
@@ -468,7 +909,7 @@ class LocalServerManager:
             return False
 
     def _download_with_progress(self, url, file_path):
-        """Download with progress reporting."""
+        """Download with progress reporting and cancellation support."""
         self.progress_callback({
             "stage": "downloading",
             "progress": 0,
@@ -479,7 +920,6 @@ class LocalServerManager:
             response = requests.get(url, stream=True, timeout=60)
             response.raise_for_status()
             
-            # Get total size
             content_length = response.headers.get('content-length')
             total_size = int(content_length) if content_length else 0
 
@@ -487,15 +927,17 @@ class LocalServerManager:
             
             with open(file_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
-                    if self.setup_cancelled:
-                        return
+                    with self._lock:
+                        if self.setup_cancelled:
+                            logger.info("Download cancelled")
+                            return
                         
                     if chunk:
                         f.write(chunk)
                         downloaded += len(chunk)
                         
                         if total_size > 0:
-                            progress = int((downloaded / total_size) * 80)  # Use 80% for download
+                            progress = int((downloaded / total_size) * 80)
                             self.progress_callback({
                                 "stage": "downloading",
                                 "progress": min(progress, 79),
@@ -509,7 +951,7 @@ class LocalServerManager:
             raise Exception(f"Download failed: {e}")
 
     def _extract_with_progress(self, archive_path, extract_path):
-        """Extract archive with progress reporting."""
+        """Extract archive with progress reporting and cancellation support."""
         self.progress_callback({
             "stage": "extracting",
             "progress": 80,
@@ -523,11 +965,13 @@ class LocalServerManager:
                     total_files = len(members)
                     
                     for i, member in enumerate(members):
-                        if self.setup_cancelled:
-                            return
+                        with self._lock:
+                            if self.setup_cancelled:
+                                logger.info("Extraction cancelled")
+                                return
                             
                         zip_ref.extract(member, extract_path)
-                        progress = 80 + int((i + 1) / total_files * 10)  # 80-90%
+                        progress = 80 + int((i + 1) / total_files * 10)
                         self.progress_callback({
                             "stage": "extracting",
                             "progress": progress,
@@ -540,11 +984,13 @@ class LocalServerManager:
                     total_files = len(members)
                     
                     for i, member in enumerate(members):
-                        if self.setup_cancelled:
-                            return
+                        with self._lock:
+                            if self.setup_cancelled:
+                                logger.info("Extraction cancelled")
+                                return
                             
                         tar_ref.extract(member, extract_path)
-                        progress = 80 + int((i + 1) / total_files * 10)  # 80-90%
+                        progress = 80 + int((i + 1) / total_files * 10)
                         self.progress_callback({
                             "stage": "extracting",
                             "progress": progress,
@@ -565,8 +1011,9 @@ class LocalServerManager:
 
     def start_server(self):
         """Start server with proper process management."""
-        if self.setup_cancelled:
-            return
+        with self._lock:
+            if self.setup_cancelled:
+                return
             
         self.progress_callback({
             "stage": "starting",
@@ -591,18 +1038,18 @@ class LocalServerManager:
             cmd = [self.executable_path, "--host", "0.0.0.0", "--port", str(self.server_port)]
             
             # Close existing log file if open
-            if self.log_file and not self.log_file.closed:
-                self.log_file.close()
+            self._close_log_file()
             
             # Open new log file
             self.log_file = open(self.log_path, 'w')
             
-            self.server_process = subprocess.Popen(
-                cmd,
-                stdout=self.log_file,
-                stderr=subprocess.STDOUT,
-                **startup_flags
-            )
+            with self._lock:
+                self.server_process = subprocess.Popen(
+                    cmd,
+                    stdout=self.log_file,
+                    stderr=subprocess.STDOUT,
+                    **startup_flags
+                )
 
             logger.info(f"Server started with PID: {self.server_process.pid}")
 
@@ -618,6 +1065,7 @@ class LocalServerManager:
 
         except Exception as e:
             logger.error(f"Failed to start server: {e}")
+            self._close_log_file()
             self.progress_callback({
                 "stage": "error",
                 "progress": 0,
@@ -627,31 +1075,43 @@ class LocalServerManager:
 
     def stop_server(self):
         """Stop the running server."""
-        if self.server_process:
-            try:
-                self.server_process.terminate()
-                self.server_process.wait(timeout=10)
-                logger.info("Local server stopped")
-            except subprocess.TimeoutExpired:
-                self.server_process.kill()
-                logger.info("Local server forcefully stopped")
-            except Exception as e:
-                logger.error(f"Failed to stop local server: {e}")
-            finally:
-                self.server_process = None
+        with self._lock:
+            if not self.server_process:
+                return
+            
+            process = self.server_process
+            self.server_process = None
+        
+        try:
+            process.terminate()
+            process.wait(timeout=10)
+            logger.info("Local server stopped gracefully")
+        except subprocess.TimeoutExpired:
+            process.kill()
+            logger.info("Local server forcefully stopped")
+        except Exception as e:
+            logger.error(f"Failed to stop local server: {e}")
         
         # Close log file
+        self._close_log_file()
+
+    def _close_log_file(self):
+        """Safely close the log file."""
         if self.log_file and not self.log_file.closed:
             try:
                 self.log_file.close()
+                self.log_file = None
             except Exception as e:
                 logger.warning(f"Failed to close log file: {e}")
+
+    def _cleanup_resources(self):
+        """Cleanup resources on exit."""
+        self.stop_server()
 
     def _kill_existing_server(self):
         """Kill any existing server processes on the target port."""
         try:
             if platform.system() == "Windows":
-                # Windows: Find and kill process using port
                 result = subprocess.run(
                     f'netstat -ano | findstr :{self.server_port}',
                     shell=True, 
@@ -676,7 +1136,6 @@ class LocalServerManager:
                                 except Exception as e:
                                     logger.warning(f"Failed to kill PID {pid}: {e}")
             else:
-                # Unix-like: Kill process using port
                 try:
                     result = subprocess.run(
                         ['lsof', '-ti', f'tcp:{self.server_port}'],
@@ -693,26 +1152,25 @@ class LocalServerManager:
                                 except Exception as e:
                                     logger.warning(f"Failed to kill PID {pid}: {e}")
                 except FileNotFoundError:
-                    # lsof not available, try alternative method
                     logger.warning("lsof not available, skipping port cleanup")
         except Exception as e:
             logger.warning(f"Failed to kill existing server: {e}")
 
     def _wait_for_server_ready(self, timeout=600):
-        """Wait for server to be ready with health checks."""
+        """Wait for server to be ready with health checks (reduced timeout)."""
         start_time = time.time()
         
         while time.time() - start_time < timeout:
-            if self.setup_cancelled:
-                return False
-                
-            try:
-                # Check if process is still running
-                if self.server_process.poll() is not None:
-                    logger.error("Server process terminated unexpectedly")
+            with self._lock:
+                if self.setup_cancelled:
                     return False
                 
-                # Try health check
+                # Check if process is still running
+                if self.server_process and self.server_process.poll() is not None:
+                    logger.error("Server process terminated unexpectedly")
+                    return False
+            
+            try:
                 response = requests.get(
                     f'http://localhost:{self.server_port}/health',
                     timeout=5
@@ -722,23 +1180,27 @@ class LocalServerManager:
                     return True
                     
             except requests.exceptions.RequestException:
-                # Server not ready yet, continue waiting
                 pass
             
             elapsed = int(time.time() - start_time)
             self.progress_callback({
                 "stage": "starting",
                 "progress": min(90 + int((elapsed / timeout) * 10), 99),
-                "message": f"Waiting for server to be ready... ({elapsed}s/{timeout}s)"
+                "message": f"Waiting for server... ({elapsed}s/{timeout}s)"
             })
             
             time.sleep(2)
         
         logger.error(f"Server failed to become ready within {timeout} seconds")
         return False
-       
+         
 class Api:
+    """PyWebView API class for exposing Python functions to JavaScript."""
+    
     def __init__(self):
+        self.detector = HardwareDetector()
+        # Detect immediately but store result
+        self._hardware_info = self.detector.detect_hardware()
         self._active_runpod_instance: Optional[Dict[str, str]] = None
         self.local_server_manager = LocalServerManager(self.send_progress_to_js)
         self.window = None
@@ -746,7 +1208,13 @@ class Api:
         self._runpod_thread: Optional[threading.Thread] = None
 
     def set_window(self, window):
+        """Set the PyWebView window instance for JS communication."""
         self.window = window
+        logger.info("PyWebView window reference set")
+
+    def get_hardware_info(self) -> Dict[str, Any]:
+        """Return cached hardware information (detected at startup)."""
+        return self._hardware_info
 
     def send_progress_to_js(self, progress_data):
         """Enhanced progress reporting with error handling."""
@@ -754,10 +1222,157 @@ class Api:
             if self.window:
                 js_code = f'window.dispatchLocalServerProgress({json.dumps(progress_data)})'
                 self.window.evaluate_js(js_code)
-                logger.info(f"Progress update sent: {progress_data['stage']} - {progress_data['progress']}%")
+                logger.debug(f"Progress update sent: {progress_data['stage']} - {progress_data['progress']}%")
         except Exception as e:
             logger.error(f"Failed to send progress to JS: {e}")
             
+    def start_local_server_setup(self):
+        """
+        Thread-safe server setup with better error handling.
+        Called by JS via: window.pywebview.api.start_local_server_setup()
+        """
+        try:
+            # Check if setup is already in progress
+            if self._setup_thread and self._setup_thread.is_alive():
+                logger.warning("Setup already in progress")
+                self.send_progress_to_js({
+                    "stage": "error",
+                    "progress": 0,
+                    "message": "Setup is already in progress",
+                    "error": "Another setup operation is running"
+                })
+                return
+
+            # Reset cancellation flag
+            self.local_server_manager.setup_cancelled = False
+
+            # Start setup in a new thread
+            self._setup_thread = threading.Thread(
+                target=self._safe_setup_wrapper,
+                daemon=True,
+                name="LocalServerSetup"
+            )
+            self._setup_thread.start()
+            logger.info("Local server setup thread started")
+            
+        except Exception as e:
+            logger.error(f"Failed to start setup thread: {e}", exc_info=True)
+            self.send_progress_to_js({
+                "stage": "error",
+                "progress": 0,
+                "message": "Failed to start setup",
+                "error": str(e)
+            })
+            
+    def _safe_setup_wrapper(self):
+        """Wrapper for setup with comprehensive error handling."""
+        try:
+            logger.info("Starting server setup")
+            self.local_server_manager.setup_server()
+            logger.info("Server setup completed")
+        except Exception as e:
+            logger.error(f"Setup failed with exception: {e}", exc_info=True)
+            self.send_progress_to_js({
+                "stage": "error",
+                "progress": 0,
+                "message": "Setup failed unexpectedly",
+                "error": str(e)
+            })
+
+    def cancel_local_server_setup(self):
+        """
+        Cancel ongoing server setup.
+        Called by JS via: window.pywebview.api.cancel_local_server_setup()
+        """
+        try:
+            logger.info("Cancellation requested for server setup")
+            
+            # Fixed: Use self.local_server_manager instead of self.server_manager
+            if self.local_server_manager:
+                self.local_server_manager.cancel_setup()
+                logger.info("Cancellation signal sent to LocalServerManager")
+            else:
+                logger.warning("No server manager instance to cancel")
+                
+        except Exception as e:
+            logger.error(f"Error cancelling setup: {e}", exc_info=True)
+
+    def check_local_server(self):
+        """
+        Called by JS to get the current server status.
+        Called by JS via: window.pywebview.api.check_local_server()
+        
+        Returns:
+            dict: Server status matching the LocalServerInfo TypeScript interface
+        """
+        try:
+            info = self.local_server_manager.check_server_status()
+            logger.debug(f"Local server status: installed={info['isInstalled']}, running={info['isRunning']}")
+            return info
+        except Exception as e:
+            logger.error(f"Error checking local server: {e}", exc_info=True)
+            # Return a default error state if checks fail
+            return {
+                "isInstalled": False,
+                "isRunning": False,
+                "port": 8000,
+                "version": "unknown",
+                "installPath": self.local_server_manager.install_path if self.local_server_manager else "",
+                "executablePath": self.local_server_manager.executable_path if self.local_server_manager else "",
+                "configPath": self.local_server_manager.config_path if self.local_server_manager else "",
+                "logPath": self.local_server_manager.log_path if self.local_server_manager else "",
+                "pid": None,
+                "lastStarted": None
+            }
+
+    def start_local_server(self):
+        """
+        Called by JS to start the installed local server.
+        Called by JS via: window.pywebview.api.start_local_server()
+        """
+        try:
+            logger.info("Start server request received")
+            
+            # Check if server is already running
+            if (self.local_server_manager.server_process and 
+                self.local_server_manager.server_process.poll() is None):
+                logger.info("Server is already running")
+                # Send a progress update to inform the UI
+                self.send_progress_to_js({
+                    "stage": "complete",
+                    "progress": 100,
+                    "message": "Server is already running"
+                })
+                return
+            
+            # Start the server
+            self.local_server_manager.start_server()
+            logger.info("Server start request completed")
+            
+        except Exception as e:
+            logger.error(f"Failed to start local server: {e}", exc_info=True)
+            self.send_progress_to_js({
+                "stage": "error",
+                "progress": 0,
+                "message": "Failed to start server",
+                "error": str(e)
+            })
+            raise
+
+    def stop_local_server(self):
+        """
+        Called by JS to stop the running local server.
+        Called by JS via: window.pywebview.api.stop_local_server()
+        """
+        try:
+            logger.info("Stop server request received")
+            self.local_server_manager.stop_server()
+            logger.info("Server stopped successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to stop local server: {e}", exc_info=True)
+            raise
+
     def send_runpod_progress_to_js(self, progress_data):
         """Sends RunPod deployment progress to the JS frontend."""
         try:
@@ -768,28 +1383,6 @@ class Api:
                 logger.info(f"RunPod progress sent: {progress_data.get('stage')} - {progress_data.get('progress')}%")
         except Exception as e:
             logger.error(f"Failed to send RunPod progress to JS: {e}")
-
-    def start_local_server_setup(self):
-        """Thread-safe server setup with better error handling."""
-        try:
-            if self._setup_thread and self._setup_thread.is_alive():
-                logger.warning("Setup already in progress")
-                return
-
-            self._setup_thread = threading.Thread(
-                target=self._safe_setup_wrapper,
-                daemon=True
-            )
-            self._setup_thread.start()
-            logger.info("Local server setup thread started")
-        except Exception as e:
-            logger.error(f"Failed to start setup thread: {e}")
-            self.send_progress_to_js({
-                "stage": "error",
-                "progress": 0,
-                "message": "Failed to start setup",
-                "error": str(e)
-            })
 
     def start_runpod_deployment(self, api_key: str):
         """Starts the RunPod deployment process in a separate thread."""
@@ -817,64 +1410,7 @@ class Api:
             self.send_runpod_progress_to_js({
                 "stage": "error", "progress": 0, "message": "Deployment failed", "error": str(e)
             })
-
-    def _safe_setup_wrapper(self):
-        """Wrapper for setup with comprehensive error handling."""
-        try:
-            self.local_server_manager.setup_server()
-        except Exception as e:
-            logger.error(f"Setup failed with exception: {e}", exc_info=True)
-            self.send_progress_to_js({
-                "stage": "error",
-                "progress": 0,
-                "message": "Setup failed unexpectedly",
-                "error": str(e)
-            })
-
-    def check_local_server(self):
-        """
-        Called by JS to get the current server status.
-        This must return a dict matching the LocalServerInfo interface in TS.
-        """
-        try:
-            info = self.local_server_manager.check_server_status()
-            logger.info(f"Local server status: {info}")
-            return info
-        except Exception as e:
-            logger.error(f"Error checking local server: {e}")
-            # Return a default error state if checks fail
-            return {
-                "isInstalled": False,
-                "isRunning": False,
-                "port": 8000,
-                "version": "unknown",
-                "installPath": "",
-                "executablePath": "",
-                "configPath": "",
-                "logPath": "",
-                "pid": None,
-                "lastStarted": None
-            }
-
-    def start_local_server(self):
-        """Called by JS to start the installed local server."""
-        try:
-            if not self.local_server_manager.server_process or self.local_server_manager.server_process.poll() is not None:
-                self.local_server_manager.start_server()
-            else:
-                logger.info("Server is already running")
-        except Exception as e:
-            logger.error(f"Failed to start local server: {e}")
-            raise
-
-    def stop_local_server(self):
-        """Called by JS to stop the running local server."""
-        try:
-            self.local_server_manager.stop_server()
-        except Exception as e:
-            logger.error(f"Failed to stop local server: {e}")
-            raise
-
+            
     def set_active_runpod_instance(self, api_key: str, pod_id: str):
         """
         Called by JS to set the active RunPod instance.
@@ -886,210 +1422,6 @@ class Api:
     def get_active_runpod_instance(self):
         """Get the currently active RunPod instance."""
         return self._active_runpod_instance
-    
-    def detect_hardware(self) -> Dict[str, Any]:
-        """Detect system hardware and return comprehensive information."""
-        os_name, arch = self._get_os_arch()
-        
-        GPU_DATABASE = {
-            # NVIDIA RTX 50 Series (2025)
-            "rtx 5090": {"vramGB": 32, "performanceScore": 100},
-            "rtx 5080": {"vramGB": 16, "performanceScore": 85},
-            "rtx 5070 ti": {"vramGB": 16, "performanceScore": 79},
-            "rtx 5070": {"vramGB": 12, "performanceScore": 68},
-            "rtx 5060 ti": {"vramGB": 16, "performanceScore": 54},
-            "rtx 5060": {"vramGB": 8, "performanceScore": 45},
-            
-            # NVIDIA RTX 40 Series
-            "rtx 4090": {"vramGB": 24, "performanceScore": 95},
-            "rtx 4080 super": {"vramGB": 16, "performanceScore": 83},
-            "rtx 4080": {"vramGB": 16, "performanceScore": 82},
-            "rtx 4070 ti super": {"vramGB": 16, "performanceScore": 74},
-            "rtx 4070 ti": {"vramGB": 12, "performanceScore": 71},
-            "rtx 4070 super": {"vramGB": 12, "performanceScore": 67},
-            "rtx 4070": {"vramGB": 12, "performanceScore": 63},
-            "rtx 4060 ti": {"vramGB": 16, "performanceScore": 55},
-            "rtx 4060": {"vramGB": 8, "performanceScore": 50},
-            
-            # AMD RX 9000 Series (2025)
-            "rx 9070 xt": {"vramGB": 16, "performanceScore": 80},
-            "rx 9070": {"vramGB": 16, "performanceScore": 75},
-            "rx 9060 xt": {"vramGB": 16, "performanceScore": 60},
-            
-            # AMD RX 7000/8000 Series
-            "rx 7900 xtx": {"vramGB": 24, "performanceScore": 85},
-            "rx 7900 xt": {"vramGB": 20, "performanceScore": 80},
-            "rx 7800 xt": {"vramGB": 16, "performanceScore": 70},
-            "rx 7700 xt": {"vramGB": 12, "performanceScore": 60},
-            "rx 7600 xt": {"vramGB": 16, "performanceScore": 55},
-            
-            # Intel Arc Battlemage (2025)
-            "arc b580": {"vramGB": 12, "performanceScore": 50},
-            "arc b570": {"vramGB": 10, "performanceScore": 45},
-            "arc b560": {"vramGB": 8, "performanceScore": 40},
-            
-            # Apple Silicon (for macOS)
-            "apple m4 pro": {"vramGB": 24, "performanceScore": 70},
-            "apple m4": {"vramGB": 16, "performanceScore": 60},
-            "apple m3 pro": {"vramGB": 18, "performanceScore": 65},
-            "apple m3": {"vramGB": 8, "performanceScore": 55},
-            "apple m2 ultra": {"vramGB": 64, "performanceScore": 80},
-            "apple m2 pro": {"vramGB": 32, "performanceScore": 70},
-            "apple m2": {"vramGB": 8, "performanceScore": 50},
-            "apple m1 ultra": {"vramGB": 64, "performanceScore": 75},
-            "apple m1 pro": {"vramGB": 32, "performanceScore": 65},
-            "apple m1": {"vramGB": 8, "performanceScore": 50},
-        }
-        
-        gpus = []
-        
-        try:
-            if os_name == "windows" or os_name == "linux":
-                # NVIDIA
-                try:
-                    result = subprocess.run(['nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader'], 
-                                          capture_output=True, text=True, timeout=10)
-                    if result.returncode == 0:
-                        for line in result.stdout.strip().split('\n'):
-                            if ',' in line:
-                                name, vram_str = line.split(',', 1)
-                                model = name.lower().strip().replace('nvidia geforce ', '').replace('geforce ', '')
-                                vram_gb = int(vram_str.strip().split()[0]) / 1024
-                                specs = GPU_DATABASE.get(model, {"vramGB": vram_gb, "performanceScore": 50})
-                                gpus.append({
-                                    "vendor": "nvidia",
-                                    "model": model,
-                                    "vramGB": specs["vramGB"],
-                                    "isSupported": specs["vramGB"] >= 8,
-                                    "performanceScore": specs["performanceScore"]
-                                })
-                except Exception:
-                    pass
-                
-                # AMD (rocm-smi if installed)
-                try:
-                    result = subprocess.run(['rocm-smi', '--showproductname', '--showmeminfo', 'vram'], 
-                                          capture_output=True, text=True, timeout=10)
-                    if result.returncode == 0:
-                        lines = result.stdout.lower().split('\n')
-                        for line in lines:
-                            if 'product name' in line and ':' in line:
-                                model = line.split(':', 1)[1].strip().replace('radeon rx ', 'rx ')
-                                vram_gb = 8  # Default fallback
-                                for vram_line in lines:
-                                    if 'vram total' in vram_line and 'mb' in vram_line:
-                                        try:
-                                            vram_mb = int(re.search(r'(\d+)', vram_line).group(1))
-                                            vram_gb = vram_mb / 1024
-                                        except:
-                                            pass
-                                specs = GPU_DATABASE.get(model, {"vramGB": vram_gb, "performanceScore": 50})
-                                gpus.append({
-                                    "vendor": "amd",
-                                    "model": model,
-                                    "vramGB": specs["vramGB"],
-                                    "isSupported": specs["vramGB"] >= 8,
-                                    "performanceScore": specs["performanceScore"]
-                                })
-                                break
-                except Exception:
-                    pass
-                
-                # Intel Arc
-                try:
-                    result = subprocess.run(['clinfo'], capture_output=True, text=True, timeout=10)
-                    if result.returncode == 0 and 'intel' in result.stdout.lower():
-                        model_match = re.search(r'intel.*arc\s+([^\n]+)', result.stdout.lower())
-                        if model_match:
-                            model = f"arc {model_match.group(1).strip()}"
-                            vram_gb = 8  # Default for Arc cards
-                            specs = GPU_DATABASE.get(model, {"vramGB": vram_gb, "performanceScore": 40})
-                            gpus.append({
-                                "vendor": "intel",
-                                "model": model,
-                                "vramGB": specs["vramGB"],
-                                "isSupported": specs["vramGB"] >= 8,
-                                "performanceScore": specs["performanceScore"]
-                            })
-                except Exception:
-                    pass
-            
-            elif os_name == "macos":
-                # Apple Silicon
-                try:
-                    result = subprocess.run(['system_profiler', 'SPDisplaysDataType'], 
-                                          capture_output=True, text=True, timeout=15)
-                    if result.returncode == 0:
-                        lines = result.stdout.lower().split('\n')
-                        for line in lines:
-                            if 'chipset model' in line and ':' in line:
-                                model = line.split(':', 1)[1].strip()
-                                if 'apple' in model:
-                                    # Extract memory info
-                                    vram_gb = 8  # Default
-                                    for mem_line in lines:
-                                        if 'vram' in mem_line and 'gb' in mem_line:
-                                            vram_match = re.search(r'(\d+)\s*gb', mem_line)
-                                            if vram_match:
-                                                vram_gb = int(vram_match.group(1))
-                                                break
-                                    
-                                    specs = GPU_DATABASE.get(model, {"vramGB": vram_gb, "performanceScore": 60})
-                                    gpus.append({
-                                        "vendor": "apple",
-                                        "model": model,
-                                        "vramGB": specs["vramGB"],
-                                        "isSupported": specs["vramGB"] >= 8,
-                                        "performanceScore": specs["performanceScore"]
-                                    })
-                                    break
-                except Exception:
-                    pass
-        
-        except Exception as e:
-            logger.error(f"Hardware detection error: {e}")
-        
-        # Calculate totals
-        total_vram = sum(gpu["vramGB"] for gpu in gpus)
-        has_gpu = len(gpus) > 0
-        
-        # Determine recommended setup
-        if has_gpu and total_vram >= 12:
-            recommended_setup = "local"
-        elif has_gpu and total_vram >= 6:
-            recommended_setup = "remote"
-        else:
-            recommended_setup = "runpod"
-        
-        return {
-            "os": os_name,
-            "arch": arch,
-            "hasGPU": has_gpu,
-            "gpus": gpus,
-            "totalVRAM": total_vram,
-            "recommendedSetup": recommended_setup
-        }
-    
-    def _get_os_arch(self):
-        """Get normalized OS and architecture."""
-        os_name = platform.system().lower()
-        arch = platform.machine().lower()
-
-        if os_name == "darwin": 
-            os_name = "macos"
-        elif os_name not in ["windows", "linux"]:
-            os_name = "linux"  # Default fallback
-
-        if arch in ["x86_64", "amd64"]: 
-            arch = "x64"
-        elif arch in ["arm64", "aarch64"]: 
-            arch = "arm64"
-        elif arch in ["i386", "i686"]:
-            arch = "x86"
-        else:
-            arch = "x64"  # Default fallback
-        
-        return os_name, arch
     
     def select_audio_file(self) -> Dict[str, Any]:
         """
@@ -1149,8 +1481,6 @@ class Api:
         """
         print("🧹 Cleaning up TTS API resources...")
         return {"success": True, "message": "Cleanup completed"}
-
-
 
 def on_closing():
   
