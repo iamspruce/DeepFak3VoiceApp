@@ -1798,6 +1798,8 @@ if __name__ == '__main__':
         
         # Create window with proper configuration
         index_path = resource_path("out/index.html")
+        
+        webview.settings['OPEN_EXTERNAL_LINKS_IN_BROWSER'] = True
 
         window = webview.create_window(
             'DeepFak3r VibeVoice',
