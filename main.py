@@ -1,5 +1,6 @@
 import base64
 import mimetypes
+import sys
 import webview
 import threading
 import json
@@ -18,6 +19,26 @@ import time
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 import atexit
+from pydub import AudioSegment
+from pydub.effects import normalize
+import base64
+from appdirs import user_data_dir
+
+APP_NAME = "DeepFak3rVibeVoice"
+APP_AUTHOR = "Spruce Emmanuel"
+
+data_path = user_data_dir(APP_NAME, APP_AUTHOR)
+
+# Make sure it exists
+os.makedirs(data_path, exist_ok=True)
+
+def resource_path(relative_path):
+    """Get absolute path to resource, works for dev and for PyInstaller"""
+    if hasattr(sys, '_MEIPASS'):
+        # When running from PyInstaller bundle
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.abspath("."), relative_path)
+
 
 
 # Setup logging
@@ -30,6 +51,221 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+class AudioProcessor:
+    """Handles advanced audio processing operations"""
+    
+    @staticmethod
+    def base64_to_audio(base64_data: str, format: str = "wav") -> AudioSegment:
+        """Convert base64 encoded audio to AudioSegment"""
+        audio_bytes = base64.b64decode(base64_data)
+        audio_io = io.BytesIO(audio_bytes)
+        return AudioSegment.from_file(audio_io, format=format)
+    
+    @staticmethod
+    def audio_to_base64(audio: AudioSegment, format: str = "wav") -> str:
+        """Convert AudioSegment to base64 encoded string"""
+        buffer = io.BytesIO()
+        audio.export(buffer, format=format)
+        buffer.seek(0)
+        return base64.b64encode(buffer.read()).decode('utf-8')
+    
+    def export_audio(
+        self,
+        main_audio: str,
+        format: str = "wav",
+        bitrate: int = 192,
+        sample_rate: int = 44100,
+        background_music: Optional[str] = None,
+        background_volume: float = 0.3,
+        intro: Optional[str] = None,
+        outro: Optional[str] = None,
+        output_filename: str = "output.wav"
+    ) -> Dict[str, Any]:
+        """
+        Export audio with advanced options including mixing and format conversion
+        
+        Args:
+            main_audio: Base64 encoded main audio
+            format: Output format (wav, mp3, ogg)
+            bitrate: Bitrate for compressed formats (kbps)
+            sample_rate: Sample rate in Hz
+            background_music: Base64 encoded background music (optional)
+            background_volume: Volume level for background music (0.0 to 1.0)
+            intro: Base64 encoded intro audio (optional)
+            outro: Base64 encoded outro audio (optional)
+            output_filename: Name for the output file
+            
+        Returns:
+            Dict with success status and file path or error message
+        """
+        try:
+            # Load main audio
+            main = self.base64_to_audio(main_audio, "webm")
+            
+            # Set sample rate
+            main = main.set_frame_rate(sample_rate)
+            
+            # Add intro if provided
+            if intro:
+                intro_audio = self.base64_to_audio(intro)
+                intro_audio = intro_audio.set_frame_rate(sample_rate)
+                main = intro_audio + main
+            
+            # Add outro if provided
+            if outro:
+                outro_audio = self.base64_to_audio(outro)
+                outro_audio = outro_audio.set_frame_rate(sample_rate)
+                main = main + outro_audio
+            
+            # Mix with background music if provided
+            if background_music:
+                bg = self.base64_to_audio(background_music)
+                bg = bg.set_frame_rate(sample_rate)
+                
+                # Adjust background volume
+                bg = bg - (20 * (1 - background_volume))  # Reduce volume
+                
+                # Loop background music if it's shorter than main audio
+                if len(bg) < len(main):
+                    loops_needed = (len(main) // len(bg)) + 1
+                    bg = bg * loops_needed
+                
+                # Trim background to match main audio length
+                bg = bg[:len(main)]
+                
+                # Mix the audio
+                main = main.overlay(bg)
+            
+            # Normalize audio
+            main = normalize(main)
+            
+            # Determine output path
+            output_dir = os.path.expanduser("~/Downloads")
+            output_path = os.path.join(output_dir, output_filename)
+            
+            # Export with appropriate settings
+            if format == "mp3":
+                main.export(
+                    output_path,
+                    format="mp3",
+                    bitrate=f"{bitrate}k",
+                    parameters=["-q:a", "0"]
+                )
+            elif format == "ogg":
+                main.export(
+                    output_path,
+                    format="ogg",
+                    bitrate=f"{bitrate}k"
+                )
+            else:  # wav
+                main.export(
+                    output_path,
+                    format="wav"
+                )
+            
+            return {
+                "success": True,
+                "file_path": output_path,
+                "message": f"Audio exported successfully to {output_path}"
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "message": f"Failed to export audio: {str(e)}"
+            }
+    
+    def trim_audio(
+        self,
+        audio_data: str,
+        start_time: float,
+        end_time: float,
+        format: str = "wav"
+    ) -> Dict[str, Any]:
+        """
+        Trim audio to specified time range
+        
+        Args:
+            audio_data: Base64 encoded audio
+            start_time: Start time in seconds
+            end_time: End time in seconds
+            format: Audio format
+            
+        Returns:
+            Dict with success status and trimmed audio data
+        """
+        try:
+            audio = self.base64_to_audio(audio_data, format)
+            
+            # Convert times to milliseconds
+            start_ms = int(start_time * 1000)
+            end_ms = int(end_time * 1000)
+            
+            # Trim audio
+            trimmed = audio[start_ms:end_ms]
+            
+            # Convert back to base64
+            trimmed_base64 = self.audio_to_base64(trimmed, format)
+            
+            return {
+                "success": True,
+                "audio_data": trimmed_base64,
+                "duration": len(trimmed) / 1000.0
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def convert_format(
+        self,
+        audio_data: str,
+        input_format: str,
+        output_format: str,
+        bitrate: int = 192
+    ) -> Dict[str, Any]:
+        """
+        Convert audio from one format to another
+        
+        Args:
+            audio_data: Base64 encoded audio
+            input_format: Input audio format
+            output_format: Desired output format
+            bitrate: Bitrate for compressed formats
+            
+        Returns:
+            Dict with success status and converted audio data
+        """
+        try:
+            audio = self.base64_to_audio(audio_data, input_format)
+            
+            # Export to new format
+            buffer = io.BytesIO()
+            if output_format == "mp3":
+                audio.export(buffer, format="mp3", bitrate=f"{bitrate}k")
+            elif output_format == "ogg":
+                audio.export(buffer, format="ogg", bitrate=f"{bitrate}k")
+            else:
+                audio.export(buffer, format=output_format)
+            
+            buffer.seek(0)
+            converted_base64 = base64.b64encode(buffer.read()).decode('utf-8')
+            
+            return {
+                "success": True,
+                "audio_data": converted_base64,
+                "format": output_format
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
 
 class HardwareDetector:
     """Detects system hardware with robust multi-vendor GPU support."""
@@ -1198,8 +1434,8 @@ class Api:
     """PyWebView API class for exposing Python functions to JavaScript."""
     
     def __init__(self):
+        self.processor = AudioProcessor()
         self.detector = HardwareDetector()
-        # Detect immediately but store result
         self._hardware_info = self.detector.detect_hardware()
         self._active_runpod_instance: Optional[Dict[str, str]] = None
         self.local_server_manager = LocalServerManager(self.send_progress_to_js)
@@ -1212,6 +1448,18 @@ class Api:
         self.window = window
         logger.info("PyWebView window reference set")
 
+    def export_audio(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Export audio with advanced options"""
+        return self.processor.export_audio(**params)
+    
+    def trim_audio(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Trim audio to specified range"""
+        return self.processor.trim_audio(**params)
+    
+    def convert_format(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert audio format"""
+        return self.processor.convert_format(**params)
+    
     def get_hardware_info(self) -> Dict[str, Any]:
         """Return cached hardware information (detected at startup)."""
         return self._hardware_info
@@ -1549,9 +1797,11 @@ if __name__ == '__main__':
         api = Api()
         
         # Create window with proper configuration
+        index_path = resource_path("out/index.html")
+
         window = webview.create_window(
             'DeepFak3r VibeVoice',
-            'out/index.html',
+            index_path,
             js_api=api,
             width=1200,
             height=800,
@@ -1559,7 +1809,8 @@ if __name__ == '__main__':
             resizable=True,
             shadow=True,
             on_top=False,
-            confirm_close=True
+            confirm_close=True,
+
         )
         
         # Set window reference for API
@@ -1570,7 +1821,7 @@ if __name__ == '__main__':
         
         # Start the webview
         logger.info("Starting webview application...")
-        webview.start(debug=False)
+        webview.start(debug=False,private_mode=False,storage_path=data_path)
         
     except Exception as e:
         logger.error(f"Failed to start application: {e}", exc_info=True)

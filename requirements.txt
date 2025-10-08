@@ -1,5 +1,7 @@
 pywebview
 requests 
 tqdm
+pydub
+appdirs
 # dev
 pyinstaller
