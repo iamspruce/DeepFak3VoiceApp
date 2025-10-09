@@ -2,6 +2,7 @@ import base64
 import mimetypes
 import sys
 import webview
+from webview.menu import Menu, MenuAction, MenuSeparator
 import threading
 import json
 import requests
@@ -1735,24 +1736,7 @@ class Api:
                 "error": str(e),
                 "traceback": traceback.format_exc()
             }
-             
-    def get_help_content(self, guide_name: str) -> Dict[str, Any]:
-        """Reads a Markdown help file and returns its content."""
-        allowed_guides = ["install-setup", "runpod-setup", "using-in-calls"]
-        if guide_name not in allowed_guides:
-            return {"success": False, "error": "Invalid guide name"}
-
-        try:
-            # Assuming your markdown files are in a 'help' folder at the root
-            file_path = resource_path(f"help/{guide_name}.md")
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            return {"success": True, "content": content}
-        except FileNotFoundError:
-            return {"success": False, "error": f"Help file '{guide_name}.md' not found."}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-        
+                  
     def cleanup_on_exit(self):
         """
         Cleanup when app is closing
@@ -1834,19 +1818,19 @@ if __name__ == '__main__':
         api = Api()
         
         menu_items = [
-            webview.Menu(
+            Menu(
                 'File',
                 [
-                    webview.MenuAction('Close', 'api.cleanup_on_exit'), # You can bind to API functions
-                    webview.MenuAction('Exit', 'api.cleanup_on_exit')
+                    MenuAction('Close', api.cleanup_on_exit), 
+                    MenuAction('Exit', api.cleanup_on_exit)
                 ]
             ),
-            webview.Menu(
+            Menu(
                 'Help',
                 [
                     # Here we call a regular Python function
-                    webview.MenuAction('How to Use This App', show_help_window),
-                    webview.MenuAction('About', lambda: api.window.evaluate_js('alert("DeepFak3r VibeVoice v1.0")'))
+                    MenuAction('How to Use This App', show_help_window),
+                    MenuAction('About', lambda: api.window.evaluate_js('alert("DeepFak3r VibeVoice v1.0")'))
                 ]
             )
         ]
