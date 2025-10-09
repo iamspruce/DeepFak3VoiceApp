@@ -1677,19 +1677,16 @@ class Api:
         """
         try:
             import webview
-            
             # Use PyWebView's built-in file dialog
             file_types = (
-                'Audio Files (*.mp3;*.wav;*.m4a;*.aac;*.ogg)',
+                'Audio Files (*.mp3;*.wav;*.m4a;*.aac;*.ogg;*.flac)',
                 'All files (*.*)',
             )
-            
             result = webview.windows[0].create_file_dialog(
                 webview.OPEN_DIALOG,
                 allow_multiple=False,
                 file_types=file_types
             )
-            
             if not result or len(result) == 0:
                 return {
                     "success": False,
@@ -1706,22 +1703,56 @@ class Api:
             filename = os.path.basename(file_path)
             mime_type, _ = mimetypes.guess_type(file_path)
             
+            # Ensure proper mime types for better compatibility
             if mime_type is None:
-                mime_type = "audio/mpeg"
+                ext = os.path.splitext(filename)[1].lower()
+                mime_type_map = {
+                    '.mp3': 'audio/mpeg',
+                    '.wav': 'audio/wav',
+                    '.m4a': 'audio/mp4',
+                    '.aac': 'audio/aac',
+                    '.ogg': 'audio/ogg',
+                    '.flac': 'audio/flac',
+                }
+                mime_type = mime_type_map.get(ext, 'audio/mpeg')
+            
+            # For WAV files, ensure correct mime type
+            if filename.lower().endswith('.wav'):
+                mime_type = 'audio/wav'
             
             return {
                 "success": True,
                 "filename": filename,
                 "file_data": file_data,
-                "mime_type": mime_type
+                "mime_type": mime_type,
+                "file_size": os.path.getsize(file_path)
             }
             
         except Exception as e:
+            import traceback
             return {
                 "success": False,
-                "error": str(e)
+                "error": str(e),
+                "traceback": traceback.format_exc()
             }
-            
+             
+    def get_help_content(self, guide_name: str) -> Dict[str, Any]:
+        """Reads a Markdown help file and returns its content."""
+        allowed_guides = ["install-setup", "runpod-setup", "using-in-calls"]
+        if guide_name not in allowed_guides:
+            return {"success": False, "error": "Invalid guide name"}
+
+        try:
+            # Assuming your markdown files are in a 'help' folder at the root
+            file_path = resource_path(f"help/{guide_name}.md")
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            return {"success": True, "content": content}
+        except FileNotFoundError:
+            return {"success": False, "error": f"Help file '{guide_name}.md' not found."}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+        
     def cleanup_on_exit(self):
         """
         Cleanup when app is closing
@@ -1792,9 +1823,34 @@ def terminate_runpod_instance(api_key, pod_id):
     
     return data["data"]["podTerminate"]
 
+def show_help_window():
+    # This is one way to show help - in a new window.
+    # See the next section for more options.
+    help_html_path = resource_path("out/help.html") # Assuming you create this file
+    webview.create_window('Help Guide', help_html_path, width=800, height=600)
+
 if __name__ == '__main__':
     try:
         api = Api()
+        
+        menu_items = [
+            webview.Menu(
+                'File',
+                [
+                    webview.MenuAction('Close', 'api.cleanup_on_exit'), # You can bind to API functions
+                    webview.MenuAction('Exit', 'api.cleanup_on_exit')
+                ]
+            ),
+            webview.Menu(
+                'Help',
+                [
+                    # Here we call a regular Python function
+                    webview.MenuAction('How to Use This App', show_help_window),
+                    webview.MenuAction('About', lambda: api.window.evaluate_js('alert("DeepFak3r VibeVoice v1.0")'))
+                ]
+            )
+        ]
+
         
         # Create window with proper configuration
         index_path = resource_path("out/index.html")
@@ -1812,7 +1868,7 @@ if __name__ == '__main__':
             shadow=True,
             on_top=False,
             confirm_close=True,
-
+            menu=menu_items
         )
         
         # Set window reference for API
