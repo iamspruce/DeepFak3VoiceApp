@@ -240,7 +240,7 @@ jobs:
   build-linux:
     name: Build Linux AppImage
     needs: create-release
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
