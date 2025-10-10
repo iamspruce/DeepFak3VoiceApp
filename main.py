@@ -1751,7 +1751,6 @@ def start_main_app():
     webview.start(debug=False,private_mode=False,storage_path=data_path)
     
 
-
 if __name__ == '__main__':
     try:
         start_main_app()
