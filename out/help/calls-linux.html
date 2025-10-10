@@ -1,0 +1,172 @@
+<div class="calls-guide">
+  <h2>📞 Using Generated Voices in Calls - Linux</h2>
+  <p>
+    <strong
+      >Want to use your AI-generated voice during live video calls, streaming,
+      or gaming?</strong
+    >
+    You'll need to route the audio through a "virtual microphone".
+  </p>
+
+  <div class="note">
+    <strong>Works with:</strong> Zoom, Discord, Skype, OBS, and most
+    calling/streaming apps! <br /><strong>Time needed:</strong> 5-10 minutes
+    one-time setup <br /><strong>Distros:</strong> Ubuntu, Fedora, Arch, and
+    most distributions
+  </div>
+
+  <div class="step">
+    <h3>Step 1: Install PulseAudio Volume Control</h3>
+    <p>
+      Most Linux systems have PulseAudio. We'll use a control panel to manage
+      it.
+    </p>
+
+    <h4>For Ubuntu/Debian:</h4>
+    <pre><code>sudo apt update
+sudo apt install pavucontrol</code></pre>
+
+    <h4>For Fedora:</h4>
+    <pre><code>sudo dnf install pavucontrol</code></pre>
+
+    <h4>For Arch:</h4>
+    <pre><code>sudo pacman -S pavucontrol</code></pre>
+
+    <p>Press Enter and type your password when asked.</p>
+  </div>
+
+  <div class="step">
+    <h3>Step 2: Create a Virtual Audio Device</h3>
+    <p>Open Terminal and run these commands one at a time:</p>
+
+    <pre><code>pactl load-module module-null-sink sink_name=VirtualMic sink_properties=device.description=Virtual_Mic</code></pre>
+
+    <p>Then:</p>
+
+    <pre><code>pactl load-module module-loopback source=VirtualMic.monitor</code></pre>
+
+    <div class="tip">
+      <strong>✅ This creates a "Virtual Mic" that apps can use!</strong>
+    </div>
+  </div>
+
+  <div class="step">
+    <h3>Step 3: Make It Permanent (Optional but Recommended)</h3>
+    <p>So it works every time you restart your computer:</p>
+
+    <ol>
+      <li>Open Terminal</li>
+      <li>Type: <code>nano ~/.config/pulse/default.pa</code></li>
+      <li>Press Enter (this opens a text editor)</li>
+      <li>Scroll to the bottom (use arrow keys)</li>
+      <li>
+        Add these two lines:
+        <pre><code>load-module module-null-sink sink_name=VirtualMic sink_properties=device.description=Virtual_Mic
+load-module module-loopback source=VirtualMic.monitor</code></pre>
+      </li>
+      <li>Press <strong>Ctrl + X</strong></li>
+      <li>Press <strong>Y</strong> (to save)</li>
+      <li>Press <strong>Enter</strong></li>
+    </ol>
+  </div>
+
+  <div class="step">
+    <h3>Step 4: Set Your System Audio</h3>
+
+    <h4>Using GUI:</h4>
+    <ol>
+      <li>
+        Open <strong>Sound Settings</strong> (search in your system settings)
+      </li>
+      <li>Go to <strong>Output</strong> devices</li>
+      <li>
+        Select <strong>"Virtual_Mic"</strong> or <strong>"Null Output"</strong>
+      </li>
+    </ol>
+
+    <h4>Using pavucontrol:</h4>
+    <ol>
+      <li>Type in Terminal: <code>pavucontrol</code></li>
+      <li>Go to the <strong>"Output Devices"</strong> tab</li>
+      <li>Set <strong>"Virtual_Mic"</strong> as the fallback device</li>
+    </ol>
+
+    <h4>To hear audio yourself AND send to calls:</h4>
+    <p>In Terminal, run:</p>
+    <pre><code>pactl load-module module-combine-sink sink_name=Combined</code></pre>
+    <p>Then set "Combined" as your output in Sound Settings.</p>
+  </div>
+
+  <div class="step">
+    <h3>Step 5: Configure Your Calling App</h3>
+
+    <h4>For Zoom:</h4>
+    <ol>
+      <li>Open Zoom → Settings → Audio</li>
+      <li>
+        For <strong>Microphone</strong>, select:
+        <strong>"Monitor of Virtual_Mic"</strong>
+      </li>
+    </ol>
+
+    <h4>For Discord:</h4>
+    <ol>
+      <li>Open Discord → Settings → Voice & Video</li>
+      <li>
+        For <strong>Input Device</strong>, select:
+        <strong>"Monitor of Virtual_Mic"</strong> or
+        <strong>"Virtual_Mic Monitor"</strong>
+      </li>
+    </ol>
+
+    <h4>For OBS:</h4>
+    <ol>
+      <li>In OBS, go to Settings → Audio</li>
+      <li>
+        For <strong>Mic/Auxiliary Audio</strong>, choose:
+        <strong>"Monitor of Virtual_Mic"</strong>
+      </li>
+    </ol>
+
+    <h4>For other apps:</h4>
+    <p>
+      Look for audio settings and choose
+      <strong>"Monitor of Virtual_Mic"</strong> as the microphone/input
+    </p>
+  </div>
+
+  <div class="step">
+    <h3>Step 6: Test It!</h3>
+    <ol>
+      <li>Open <strong>DeepFak3r Vibe Voice</strong></li>
+      <li>Generate and play a voice</li>
+      <li>Check if your calling app picks it up!</li>
+    </ol>
+  </div>
+
+  <div class="note">
+    <strong>💡 Switching back to your real microphone:</strong>
+    <p>
+      Go to your app's audio settings and change the input device back to your
+      normal microphone. You can switch back and forth anytime!
+    </p>
+  </div>
+
+  <div class="important">
+    <strong>⚠️ Troubleshooting:</strong>
+    <ul>
+      <li>
+        <strong>No audio:</strong> Make sure the virtual device is set as your
+        system output
+      </li>
+      <li>
+        <strong>Can't hear yourself:</strong> Use the Combined sink setup (Step
+        4)
+      </li>
+      <li>
+        <strong>Commands not working:</strong> Make sure PulseAudio is running:
+        <code>pulseaudio --check</code>
+      </li>
+    </ul>
+  </div>
+</div>

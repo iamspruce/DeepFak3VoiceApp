@@ -1,0 +1,208 @@
+<div class="calls-guide">
+  <h2>📞 Using Generated Voices in Calls - Windows</h2>
+  <p>
+    <strong
+      >Want to use your AI-generated voice during live video calls, streaming,
+      or gaming?</strong
+    >
+    You'll need to route the audio through a "virtual microphone".
+  </p>
+
+  <div class="note">
+    <strong>Works with:</strong> Zoom, WhatsApp, Discord, Skype, Teams, OBS,
+    Streamlabs, and most calling/streaming apps! <br /><strong
+      >Time needed:</strong
+    >
+    5-10 minutes one-time setup
+  </div>
+
+  <div class="step">
+    <h3>Step 1: Download VB-CABLE (Virtual Audio Driver)</h3>
+    <ol>
+      <li>
+        Go to:
+        <strong
+          ><a href="https://vb-audio.com/Cable/" target="_blank"
+            >vb-audio.com/Cable</a
+          ></strong
+        >
+      </li>
+      <li>
+        Click <strong>"Download"</strong> under "VB-CABLE Virtual Audio Device"
+      </li>
+      <li>Extract the downloaded zip file</li>
+      <li>
+        <strong>Right-click</strong> <code>VBCABLE_Setup_x64.exe</code> (or
+        <code>VBCABLE_Setup.exe</code>)
+      </li>
+      <li>Choose <strong>"Run as administrator"</strong></li>
+      <li>Click <strong>"Install Driver"</strong></li>
+      <li>Click <strong>"OK"</strong> when it says "Installation Complete"</li>
+      <li><strong>Restart your computer</strong></li>
+    </ol>
+  </div>
+
+  <div class="step">
+    <h3>Step 2: Download Voicemeeter (Audio Mixer)</h3>
+    <p>This lets you hear audio yourself while sending it to calls.</p>
+    <ol>
+      <li>
+        Go to:
+        <strong
+          ><a href="https://vb-audio.com/Voicemeeter/" target="_blank"
+            >vb-audio.com/Voicemeeter</a
+          ></strong
+        >
+      </li>
+      <li>
+        Download <strong>"Voicemeeter"</strong> (the basic free version, not
+        Banana or Potato)
+      </li>
+      <li>
+        Extract the zip and run the installer <strong>as administrator</strong>
+      </li>
+      <li>Click <strong>"Install"</strong></li>
+      <li><strong>Restart your computer</strong> again</li>
+    </ol>
+  </div>
+
+  <div class="step">
+    <h3>Step 3: Set Up Voicemeeter</h3>
+    <ol>
+      <li>
+        Search <strong>"Voicemeeter"</strong> in the Start menu and open it
+      </li>
+      <li>
+        The Voicemeeter window has lots of buttons – don't worry, we only need a
+        few!
+      </li>
+    </ol>
+
+    <h4>Configure outputs:</h4>
+    <ul>
+      <li>
+        In the <strong>top right corner</strong>, find <strong>"A1"</strong>
+      </li>
+      <li>Click the dropdown menu under <strong>A1</strong></li>
+      <li>
+        Select your <strong>speakers or headphones</strong> (like "Speakers",
+        "Realtek", or your headphone name)
+      </li>
+      <li>Next to A1, find <strong>"B1"</strong></li>
+      <li>Click the dropdown under <strong>B1</strong></li>
+      <li>Select <strong>"CABLE Input (VB-Audio Virtual Cable)"</strong></li>
+    </ul>
+
+    <p>
+      <strong>That's it for Voicemeeter setup!</strong> You can minimize it
+      (keep it running).
+    </p>
+  </div>
+
+  <div class="step">
+    <h3>Step 4: Set Windows to Use Voicemeeter</h3>
+    <ol>
+      <li>
+        <strong>Right-click</strong> the speaker icon in your taskbar (bottom
+        right corner)
+      </li>
+      <li>
+        Choose <strong>"Open Sound settings"</strong> or
+        <strong>"Sounds"</strong>
+      </li>
+      <li>
+        Under <strong>"Output"</strong> (or "Playback"), select:
+        <strong>"Voicemeeter Input (VB-Audio Virtual...)"</strong>
+      </li>
+      <li>
+        Under <strong>"Input"</strong> (or "Recording"), you can leave your
+        regular microphone
+      </li>
+    </ol>
+
+    <div class="tip">
+      <strong
+        >✅ Now all your computer's audio goes through Voicemeeter!</strong
+      >
+    </div>
+  </div>
+
+  <div class="step">
+    <h3>Step 5: Configure Your Calling/Streaming App</h3>
+
+    <h4>For Zoom:</h4>
+    <ol>
+      <li>Open Zoom</li>
+      <li>Click your profile picture → <strong>Settings</strong></li>
+      <li>Go to <strong>Audio</strong></li>
+      <li>
+        For <strong>Microphone</strong>, select:
+        <strong>"CABLE Output (VB-Audio Virtual Cable)"</strong>
+      </li>
+      <li>For <strong>Speaker</strong>, leave your normal speakers</li>
+      <li>Uncheck "Automatically adjust microphone"</li>
+    </ol>
+
+    <h4>For WhatsApp Desktop:</h4>
+    <ol>
+      <li>Open WhatsApp</li>
+      <li>Go to <strong>Settings</strong></li>
+      <li>
+        For <strong>Microphone</strong>, choose:
+        <strong>"CABLE Output (VB-Audio Virtual Cable)"</strong>
+      </li>
+    </ol>
+
+    <h4>For Discord:</h4>
+    <ol>
+      <li>Open Discord</li>
+      <li>Click the gear icon (User Settings)</li>
+      <li>Go to <strong>Voice & Video</strong></li>
+      <li>
+        For <strong>Input Device</strong>, select:
+        <strong>"CABLE Output (VB-Audio Virtual Cable)"</strong>
+      </li>
+      <li>Turn OFF "Automatically determine input sensitivity"</li>
+    </ol>
+
+    <h4>For OBS/Streamlabs:</h4>
+    <ol>
+      <li>In OBS, go to <strong>Settings</strong> → <strong>Audio</strong></li>
+      <li>
+        For <strong>Mic/Auxiliary Audio</strong>, choose:
+        <strong>"CABLE Output (VB-Audio Virtual Cable)"</strong>
+      </li>
+    </ol>
+  </div>
+
+  <div class="step">
+    <h3>Step 6: Test It!</h3>
+    <ol>
+      <li>Keep Voicemeeter open (minimized is fine)</li>
+      <li>Open <strong>DeepFak3r Vibe Voice</strong></li>
+      <li>Generate and play a voice</li>
+      <li><strong>You should hear it</strong> through your speakers</li>
+      <li>The audio also goes to your calling app!</li>
+    </ol>
+
+    <h4>Volume too low in calls?</h4>
+    <ul>
+      <li>Open Voicemeeter</li>
+      <li>On the left side, find the sliders labeled "HARDWARE INPUT"</li>
+      <li>Move them <strong>up</strong> to increase volume sent to calls</li>
+    </ul>
+  </div>
+
+  <div class="important">
+    <strong>⚠️ Remember:</strong> Keep Voicemeeter running while using calls.
+    You can minimize it, but don't close it!
+  </div>
+
+  <div class="note">
+    <strong>💡 Switching back to your real microphone:</strong>
+    <p>
+      Go to your app's audio settings and change microphone back to your normal
+      mic. You can switch back and forth anytime!
+    </p>
+  </div>
+</div>

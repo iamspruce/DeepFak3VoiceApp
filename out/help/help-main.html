@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DeepFak3r Vibe Voice - Help Guide</title>
+    <link rel="stylesheet" href="help-styles.css" />
+  </head>
+  <body>
+    <div class="container">
+      <header>
+        <h1>🎤 DeepFak3r Vibe Voice - Help Guide</h1>
+        <p class="subtitle">Complete setup and usage instructions</p>
+      </header>
+
+      <nav class="tabs">
+        <button class="tab-btn active" data-tab="installation">
+          Installation
+        </button>
+        <button class="tab-btn" data-tab="runpod">
+          Cloud Computing (RunPod)
+        </button>
+        <button class="tab-btn" data-tab="calls">Using in Calls</button>
+        <button class="tab-btn" data-tab="troubleshooting">
+          Troubleshooting
+        </button>
+      </nav>
+
+      <main id="content-frame">
+        <!-- Content will be loaded here dynamically -->
+        <div class="loading">Loading...</div>
+      </main>
+
+      <footer>
+        <p>Need more help? Email: <strong>support@deepfak3r.com</strong></p>
+        <p class="version">Version 1.0 | October 2025</p>
+      </footer>
+    </div>
+
+    <script>
+      // Detect OS
+      function detectOS() {
+        const platform = window.pywebview ? window.pywebview.platform : null;
+
+        if (platform) {
+          // Use pywebview's platform detection
+          if (platform.startsWith("win")) return "windows";
+          if (platform === "darwin") return "mac";
+          if (platform.startsWith("linux")) return "linux";
+        }
+
+        // Fallback to userAgent
+        const userAgent = window.navigator.userAgent.toLowerCase();
+        if (userAgent.indexOf("win") > -1) return "windows";
+        if (userAgent.indexOf("mac") > -1) return "mac";
+        if (userAgent.indexOf("linux") > -1 || userAgent.indexOf("x11") > -1)
+          return "linux";
+
+        return "windows"; // Default fallback
+      }
+
+      const currentOS = detectOS();
+      console.log("Detected OS:", currentOS);
+
+      // Content mapping
+      const contentMap = {
+        installation: {
+          windows: "install-windows.html",
+          mac: "install-mac.html",
+          linux: "install-linux.html",
+        },
+        runpod: "runpod-setup.html", // Universal
+        calls: {
+          windows: "calls-windows.html",
+          mac: "calls-mac.html",
+          linux: "calls-linux.html",
+        },
+      };
+
+      // Load content
+      function loadContent(tab) {
+        const contentFrame = document.getElementById("content-frame");
+        contentFrame.innerHTML = '<div class="loading">Loading...</div>';
+
+        let filename = contentMap[tab];
+
+        // If content is OS-specific, get the right file
+        if (typeof filename === "object") {
+          filename = filename[currentOS];
+        }
+
+        const filepath = `help/${filename}`;
+
+        fetch(filepath)
+          .then((response) => {
+            if (!response.ok) throw new Error("Failed to load content");
+            return response.text();
+          })
+          .then((html) => {
+            contentFrame.innerHTML = html;
+            // Scroll to top
+            contentFrame.scrollTop = 0;
+          })
+          .catch((error) => {
+            console.error("Error loading content:", error);
+            contentFrame.innerHTML = `
+                        <div class="error">
+                            <h2>⚠️ Error Loading Content</h2>
+                            <p>Could not load help content. Please check your installation.</p>
+                            <p><strong>File:</strong> ${filepath}</p>
+                        </div>
+                    `;
+          });
+      }
+
+      // Tab switching
+      document.querySelectorAll(".tab-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          // Update active tab
+          document
+            .querySelectorAll(".tab-btn")
+            .forEach((b) => b.classList.remove("active"));
+          btn.classList.add("active");
+
+          // Load content
+          const tab = btn.getAttribute("data-tab");
+
+          if (tab === "troubleshooting") {
+            // Show inline troubleshooting
+            showTroubleshooting();
+          } else {
+            loadContent(tab);
+          }
+        });
+      });
+
+      // Inline troubleshooting (lighter weight)
+      function showTroubleshooting() {
+        const contentFrame = document.getElementById("content-frame");
+        contentFrame.innerHTML = `
+                <div class="troubleshooting">
+                    <h2>🔧 Troubleshooting</h2>
+                    
+                    <div class="trouble-section">
+                        <h3>Installation Issues</h3>
+                        <div class="qa">
+                            <strong>Q: "Windows protected your PC" warning</strong>
+                            <p>A: Click "More info" → "Run anyway". Make sure you installed the certificate first.</p>
+                        </div>
+                        <div class="qa">
+                            <strong>Q: Mac says "Cannot open because it's from an unidentified developer"</strong>
+                            <p>A: System Settings → Privacy & Security → Click "Open Anyway" next to the blocked app message.</p>
+                        </div>
+                        <div class="qa">
+                            <strong>Q: Linux "Permission denied"</strong>
+                            <p>A: Run: <code>chmod +x DeepFak3rVoice</code></p>
+                        </div>
+                    </div>
+
+                    <div class="trouble-section">
+                        <h3>License Key Issues</h3>
+                        <div class="qa">
+                            <strong>Q: "Invalid license key"</strong>
+                            <p>A: Check for extra spaces. Make sure you're online. Contact support@deepfak3r.com if it persists.</p>
+                        </div>
+                        <div class="qa">
+                            <strong>Q: "License already activated"</strong>
+                            <p>A: Each license works on 3 devices. Contact support to reset if needed.</p>
+                        </div>
+                    </div>
+
+                    <div class="trouble-section">
+                        <h3>Performance Issues</h3>
+                        <div class="qa">
+                            <strong>Q: App is very slow or crashes</strong>
+                            <p>A: Use RunPod cloud computing (see Cloud Computing tab). This solves most performance issues!</p>
+                        </div>
+                        <div class="qa">
+                            <strong>Q: "Out of memory" error</strong>
+                            <p>A: Your computer needs more RAM. Use RunPod instead (see Cloud Computing tab).</p>
+                        </div>
+                    </div>
+
+                    <div class="trouble-section">
+                        <h3>RunPod Issues</h3>
+                        <div class="qa">
+                            <strong>Q: "Could not connect to RunPod"</strong>
+                            <p>A: Check your API key is correct. Verify you have credit in your account. Check internet connection.</p>
+                        </div>
+                        <div class="qa">
+                            <strong>Q: Still using credit after closing app</strong>
+                            <p>A: Open RunPod dashboard → Pods → Manually terminate running pods.</p>
+                        </div>
+                    </div>
+
+                    <div class="trouble-section">
+                        <h3>Virtual Audio / Calling Issues</h3>
+                        <div class="qa">
+                            <strong>Q: No sound in Zoom/Discord</strong>
+                            <p>A: Double-check you selected the virtual microphone in the app's audio settings. Restart the calling app.</p>
+                        </div>
+                        <div class="qa">
+                            <strong>Q: I can't hear the audio myself</strong>
+                            <p>A: <strong>Mac:</strong> Use Multi-Output Device. <strong>Windows:</strong> Voicemeeter must be running. <strong>Linux:</strong> Use Combined sink.</p>
+                        </div>
+                        <div class="qa">
+                            <strong>Q: People hear an echo</strong>
+                            <p>A: Use headphones instead of speakers. Turn off echo cancellation in your calling app.</p>
+                        </div>
+                    </div>
+
+                    <div class="contact-box">
+                        <h3>Still Need Help?</h3>
+                        <p>📧 Email: <strong>support@deepfak3r.com</strong></p>
+                        <p>Please include: your OS, what step you're on, and any error messages.</p>
+                    </div>
+                </div>
+            `;
+      }
+
+      // Load initial content (Installation for detected OS)
+      window.addEventListener("DOMContentLoaded", () => {
+        loadContent("installation");
+      });
+    </script>
+  </body>
+</html>

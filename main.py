@@ -1,6 +1,8 @@
 import base64
 import mimetypes
 import sys
+import tempfile
+import shutil 
 import webview
 from webview.menu import Menu, MenuAction, MenuSeparator
 import threading
@@ -24,6 +26,7 @@ from pydub import AudioSegment
 from pydub.effects import normalize
 import base64
 from appdirs import user_data_dir
+import traceback
 
 APP_NAME = "DeepFak3rVibeVoice"
 APP_AUTHOR = "Spruce Emmanuel"
@@ -35,22 +38,24 @@ os.makedirs(data_path, exist_ok=True)
 
 def resource_path(relative_path):
     """Get absolute path to resource, works for dev and for PyInstaller"""
-    if hasattr(sys, '_MEIPASS'):
-        # When running from PyInstaller bundle
-        return os.path.join(sys._MEIPASS, relative_path)
-    return os.path.join(os.path.abspath("."), relative_path)
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_path, relative_path)
 
+# Log file stored inside user data directory
+log_file = os.path.join(data_path, "DeepFak3rVibeVoice.log")
 
-
-# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('tts_server.log'),
+        logging.FileHandler(log_file, encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
+
 logger = logging.getLogger(__name__)
 
 class AudioProcessor:
@@ -314,7 +319,6 @@ class HardwareDetector:
     def detect_hardware(self) -> Dict[str, Any]:
         """Detect system hardware and return comprehensive information."""
         os_name, arch = self._get_os_arch()
-        logger.info(f"Detecting hardware on {os_name}/{arch}")
         
         gpus = []
         
@@ -347,7 +351,6 @@ class HardwareDetector:
             "recommendedSetup": recommended_setup
         }
         
-        logger.info(f"Hardware detection complete: {len(gpus)} GPU(s), {total_vram:.1f}GB VRAM")
         return result
     
     def _detect_nvidia_gpu(self) -> List[Dict[str, Any]]:
@@ -370,7 +373,6 @@ class HardwareDetector:
                         try:
                             vram_gb = float(vram_mb.strip()) / 1024
                         except ValueError:
-                            logger.warning(f"Could not parse VRAM for {name}")
                             continue
                         
                         perf_score = self._get_performance_score(model)
@@ -382,7 +384,6 @@ class HardwareDetector:
                             "isSupported": vram_gb >= 6,
                             "performanceScore": perf_score
                         })
-                        logger.debug(f"Detected NVIDIA GPU: {model} ({vram_gb:.1f}GB)")
         except FileNotFoundError:
             logger.debug("nvidia-smi not found")
         except subprocess.TimeoutExpired:
@@ -435,7 +436,6 @@ class HardwareDetector:
                             "isSupported": current_gpu['vram'] >= 6,
                             "performanceScore": perf_score
                         })
-                        logger.debug(f"Detected AMD GPU: {current_gpu['model']} ({current_gpu['vram']:.1f}GB)")
                         current_gpu = {}  # Reset for next GPU
                         
         except FileNotFoundError:
@@ -485,7 +485,6 @@ class HardwareDetector:
                             "isSupported": vram_gb >= 6,
                             "performanceScore": perf_score
                         })
-                        logger.debug(f"Detected Intel GPU: {model} ({vram_gb:.1f}GB)")
         except FileNotFoundError:
             logger.debug("xpu-smi not found, trying clinfo")
         except Exception as e:
@@ -563,7 +562,6 @@ class HardwareDetector:
                     "isSupported": True,  # Apple Silicon always supported
                     "performanceScore": perf_score
                 })
-                logger.debug(f"Detected Apple Silicon: {model} ({vram_gb:.1f}GB unified memory)")
                 
         except Exception as e:
             logger.error(f"Apple Silicon detection error: {e}")
@@ -727,7 +725,6 @@ class RunPodManager:
         try:
             data = self._graphql_request(query)
             balance = data.get("myself", {}).get("currentBalance", 0)
-            logger.info(f"RunPod account balance: ${balance}")
             return True
         except Exception as e:
             logger.error(f"API key validation failed: {e}")
@@ -854,13 +851,11 @@ class RunPodManager:
                 logging.info(f"Pod data: {json.dumps(pod_data, indent=2)}")
                 
                 if pod_data is None:
-                    logger.warning(f"Pod data is None for pod {pod_id}, retrying...")
                     time.sleep(5)
                     continue
                 
                 pod_obj = pod_data.get("pod")
                 if pod_obj is None:
-                    logger.info(f"Pod {pod_id} not yet available, retrying...")
                     time.sleep(5)
                     continue
                 
@@ -869,7 +864,6 @@ class RunPodManager:
                 
                 # Check if runtime info is available yet. If not, continue waiting.
                 if not runtime_info:
-                    logger.info(f"Pod {pod_id} runtime not yet initialized, retrying...")
                     time.sleep(5)
                     continue
 
@@ -883,7 +877,6 @@ class RunPodManager:
                         try:
                             response = requests.get(f"{url}/health", timeout=5)
                             if response.ok:
-                                logger.info(f"RunPod server is healthy at {url}")
                                 return url
                         except requests.RequestException:
                             pass # Ignore connection errors while waiting
@@ -891,6 +884,19 @@ class RunPodManager:
                 time.sleep(5)
                 
             raise TimeoutError("Server failed to become ready within the timeout period.")
+
+# --- Custom Exceptions ---
+class UnsupportedArchitectureError(Exception):
+    """Custom exception for when a build for the user's OS/arch is not found."""
+    pass
+
+class ServerStartupError(Exception):
+    """Custom exception for when the server process fails to become ready."""
+    pass
+
+class SecurityException(Exception):
+    """Custom exception for security-related errors, like path traversal."""
+    pass
 
 class LocalServerManager:
     def __init__(self, progress_callback):
@@ -910,42 +916,33 @@ class LocalServerManager:
         self.executable_path = os.path.join(self.install_path, self.executable_name)
         self.config_path = os.path.join(self.install_path, "config.json")
         self.log_path = os.path.join(self.install_path, "server.log")
+        self.pid_path = os.path.join(self.install_path, "server.pid")
         
         # Register cleanup on exit
         atexit.register(self._cleanup_resources)
         
     def cancel_setup(self):
-        """Cancel ongoing setup."""
         with self._lock:
             self.setup_cancelled = True
             logger.info("Setup cancellation requested")
 
     def _get_os_arch(self):
-        """Enhanced OS/arch detection."""
         os_name = platform.system().lower()
         arch = platform.machine().lower()
 
-        # Normalize OS names
-        if os_name == "darwin": 
-            os_name = "macos"
+        if os_name == "darwin": os_name = "macos"
         elif os_name not in ["windows", "linux"]:
             raise ValueError(f"Unsupported OS: {os_name}")
 
-        # Normalize architecture
-        if arch in ["x86_64", "amd64"]: 
-            arch = "amd64"
-        elif arch in ["arm64", "aarch64"]: 
-            arch = "arm64"
-        elif arch in ["i386", "i686"]:
-            arch = "x86"
+        if arch in ["x86_64", "amd64"]: arch = "amd64"
+        elif arch in ["arm64", "aarch64"]: arch = "arm64"
+        elif arch in ["i386", "i686"]: arch = "x86"
         else:
-            logger.warning(f"Unknown architecture {arch}, assuming x64")
-            arch = "x64"
+            raise ValueError(f"Unsupported architecture: {arch}")
         
         return os_name, arch
 
     def _get_applications_folder(self, os_name):
-        """Get installation directory with proper permissions."""
         if os_name == "windows":
             base_dir = os.environ.get('LOCALAPPDATA', os.path.expanduser('~\\AppData\\Local'))
             install_dir = os.path.join(base_dir, 'DeepFak3rVibeVoiceServer')
@@ -954,7 +951,6 @@ class LocalServerManager:
         else:  # linux
             install_dir = os.path.expanduser('~/.local/share/deepfak3r-vibevoice-server')
         
-        # Ensure directory exists and is writable
         Path(install_dir).mkdir(parents=True, exist_ok=True)
         
         if not os.access(install_dir, os.W_OK):
@@ -963,32 +959,12 @@ class LocalServerManager:
         return install_dir
 
     def _get_download_url(self, os_name, arch):
-        """Get download URL with fallback options."""
         base_url = f"https://github.com/{self.github_repo}/releases/latest/download"
         filename = f"vibevoice-{os_name}-{arch}"
         ext = "zip" if os_name == "windows" else "tar.gz"
         return f"{base_url}/{filename}.{ext}", f"{filename}.{ext}"
 
-    def _verify_download(self, file_path, expected_checksum=None):
-        """Verify downloaded file integrity."""
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Downloaded file not found: {file_path}")
-            
-        file_size = os.path.getsize(file_path)
-        if file_size < 1024 * 1024:  # Less than 1MB is suspicious
-            raise ValueError(f"Downloaded file too small: {file_size} bytes")
-            
-        # Checksum verification if provided
-        if expected_checksum:
-            with open(file_path, "rb") as f:
-                file_hash = hashlib.sha256(f.read()).hexdigest()
-                if file_hash != expected_checksum:
-                    raise ValueError(f"Checksum mismatch for {file_path}")
-        
-        logger.info(f"Download verified: {file_path} ({file_size:,} bytes)")
-
     def setup_server(self):
-        """Enhanced server setup with comprehensive error handling."""
         try:
             with self._lock:
                 if self.setup_cancelled:
@@ -997,22 +973,18 @@ class LocalServerManager:
 
             logger.info(f"Setting up server for {self.os_name}-{self.arch} in {self.install_path}")
 
-            # Check if already installed and working
             if os.path.exists(self.executable_path):
                 logger.info("Server executable found, testing...")
                 if self._test_existing_installation(self.executable_path):
                     logger.info("Existing installation is working")
-                    self.progress_callback({
-                        "stage": "starting",
-                        "progress": 90,
-                        "message": "Starting existing server installation..."
-                    })
+                    self.progress_callback({"stage": "starting", "progress": 90, "message": "Starting existing server..."})
                     self.start_server()
                     return
                 else:
                     logger.warning("Existing installation not working, reinstalling...")
+                    self._cleanup_failed_install() # Clean before reinstalling
+                    Path(self.install_path).mkdir(parents=True, exist_ok=True)
 
-            # Download
             download_url, filename = self._get_download_url(self.os_name, self.arch)
             archive_path = os.path.join(self.install_path, filename)
             
@@ -1020,302 +992,187 @@ class LocalServerManager:
             self._download_with_progress(download_url, archive_path)
             
             with self._lock:
-                if self.setup_cancelled:
-                    self._cleanup_partial_download(archive_path)
-                    return
+                if self.setup_cancelled: self._cleanup_partial_download(archive_path); return
 
-            # Verify download
             self._verify_download(archive_path)
-
-            # Extract
             self._extract_with_progress(archive_path, self.install_path)
             
             with self._lock:
-                if self.setup_cancelled:
-                    self._cleanup_partial_download(archive_path)
-                    return
+                if self.setup_cancelled: self._cleanup_partial_download(archive_path); return
 
-            # Find the executable after extraction
             self._locate_executable()
-
-            # Cleanup archive
             self._safe_remove(archive_path)
 
-            # Make executable (Unix-like systems)
-            if self.os_name != "windows":
-                os.chmod(self.executable_path, 0o755)
+            if self.os_name != "windows": os.chmod(self.executable_path, 0o755)
 
-            # Start server
             self.start_server()
 
+        except UnsupportedArchitectureError as e:
+            logger.error(f"Setup failed: Unsupported OS/Architecture. {e}")
+            self.progress_callback({"stage": "error", "progress": 0, "message": str(e), "error": str(e)})
+        
         except Exception as e:
             logger.error(f"Setup failed: {e}", exc_info=True)
-            self.progress_callback({
-                "stage": "error",
-                "progress": 0,
-                "message": "Setup failed",
-                "error": str(e)
-            })
+            ## IMPROVEMENT: Clean up the entire installation directory on any failure
+            self._cleanup_failed_install()
+            self.progress_callback({"stage": "error", "progress": 0, "message": "Setup failed", "error": str(e)})
 
-    def _cleanup_partial_download(self, archive_path):
-        """Clean up partially downloaded files."""
-        logger.info("Cleaning up partial download")
-        self._safe_remove(archive_path)
-        self.progress_callback({
-            "stage": "error",
-            "progress": 0,
-            "message": "Setup cancelled by user"
-        })
-
-    def _safe_remove(self, file_path):
-        """Safely remove a file."""
+    def _cleanup_failed_install(self):
+        """Remove the entire installation directory on a failed setup."""
+        logger.info(f"Cleaning up failed installation at {self.install_path}")
         try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-                logger.info(f"Removed: {file_path}")
+            self._kill_existing_server_by_pid() # Stop any process we might have started
+            if os.path.isdir(self.install_path):
+                shutil.rmtree(self.install_path)
         except Exception as e:
-            logger.warning(f"Failed to remove {file_path}: {e}")
+            logger.error(f"Failed to clean up installation directory: {e}")
 
-    def _locate_executable(self):
-        """Find the executable after extraction (handles subdirectories)."""
-        # First check if it's directly in install_path
-        if os.path.exists(self.executable_path):
-            logger.info(f"Executable found at: {self.executable_path}")
-            return
-
-        # Search in subdirectories
-        for root, dirs, files in os.walk(self.install_path):
-            if self.executable_name in files:
-                self.executable_path = os.path.join(root, self.executable_name)
-                logger.info(f"Executable found at: {self.executable_path}")
-                return
-        
-        raise FileNotFoundError(f"Executable '{self.executable_name}' not found after extraction")
-
-    def check_server_status(self) -> Dict[str, Any]:
-        """Get comprehensive server status information."""
-        with self._lock:
-            is_installed = os.path.exists(self.executable_path)
-            is_running = self.server_process is not None and self.server_process.poll() is None
-        
-        # Get version if installed
-        version = None
-        if is_installed:
-            try:
-                result = subprocess.run(
-                    [self.executable_path, "--version"],
-                    capture_output=True,
-                    text=True,
-                    timeout=10
-                )
-                if result.returncode == 0:
-                    version = result.stdout.strip()
-            except Exception:
-                version = "1.0.0"  # Default version
-        
-        # Get PID if running
-        pid = None
-        if is_running:
-            pid = self.server_process.pid
-
-        return {
-            "isInstalled": is_installed,
-            "version": version or "1.0.0",
-            "installPath": self.install_path,
-            "executablePath": self.executable_path,
-            "configPath": self.config_path,
-            "logPath": self.log_path,
-            "pid": pid,
-            "port": self.server_port,
-            "isRunning": is_running,
-            "lastStarted": time.time() if is_running else None
-        }
-
-    def _test_existing_installation(self, executable_path):
-        """Test if existing installation works."""
-        try:
-            result = subprocess.run(
-                [executable_path, "--version"],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-            return result.returncode == 0
-        except Exception as e:
-            logger.warning(f"Failed to test existing installation: {e}")
-            return False
+    ## ----- Major refactor of download and extraction methods for security and clarity ----- ##
 
     def _download_with_progress(self, url, file_path):
-        """Download with progress reporting and cancellation support."""
-        self.progress_callback({
-            "stage": "downloading",
-            "progress": 0,
-            "message": "Starting download..."
-        })
-
+        self.progress_callback({"stage": "downloading", "progress": 0, "message": "Starting download..."})
         try:
-            response = requests.get(url, stream=True, timeout=60)
-            response.raise_for_status()
-            
-            content_length = response.headers.get('content-length')
-            total_size = int(content_length) if content_length else 0
-
-            downloaded = 0
-            
-            with open(file_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    with self._lock:
-                        if self.setup_cancelled:
-                            logger.info("Download cancelled")
-                            return
-                        
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        
+            with requests.get(url, stream=True, timeout=60) as response:
+                response.raise_for_status()
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded = 0
+                with open(file_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        with self._lock:
+                            if self.setup_cancelled: logger.info("Download cancelled"); return
+                        f.write(chunk); downloaded += len(chunk)
                         if total_size > 0:
                             progress = int((downloaded / total_size) * 80)
-                            self.progress_callback({
-                                "stage": "downloading",
-                                "progress": min(progress, 79),
-                                "message": f"Downloading... {downloaded:,}/{total_size:,} bytes"
-                            })
-
+                            self.progress_callback({"stage": "downloading", "progress": min(progress, 79), "message": f"Downloading... {downloaded:,}/{total_size:,} bytes"})
             logger.info(f"Download completed: {file_path}")
-            
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                raise UnsupportedArchitectureError("We're sorry, we do not currently support running Deefka3r vibevoice offline on your system. Please try using the cloud or remote option.")
+            else:
+                raise Exception(f"Download failed with an HTTP error: {e.response.status_code}")
         except requests.exceptions.RequestException as e:
-            logger.error(f"Download failed: {e}")
-            raise Exception(f"Download failed: {e}")
+            raise Exception(f"Download failed due to a network issue: {e}")
 
     def _extract_with_progress(self, archive_path, extract_path):
-        """Extract archive with progress reporting and cancellation support."""
-        self.progress_callback({
-            "stage": "extracting",
-            "progress": 80,
-            "message": "Extracting files..."
-        })
-
+        self.progress_callback({"stage": "extracting", "progress": 80, "message": "Extracting files..."})
+        abs_extract_path = os.path.abspath(extract_path)
         try:
             if archive_path.endswith(".zip"):
                 with zipfile.ZipFile(archive_path, 'r') as zip_ref:
-                    members = zip_ref.namelist()
-                    total_files = len(members)
-                    
+                    members = zip_ref.infolist()
                     for i, member in enumerate(members):
                         with self._lock:
-                            if self.setup_cancelled:
-                                logger.info("Extraction cancelled")
-                                return
-                            
+                            if self.setup_cancelled: logger.info("Extraction cancelled"); return
+                        
+                        ## IMPROVEMENT: Security check for path traversal (Zip Slip)
+                        target_path = os.path.abspath(os.path.join(extract_path, member.filename))
+                        if not target_path.startswith(abs_extract_path):
+                            raise SecurityException(f"Malicious archive detected: invalid path {member.filename}")
+                        
                         zip_ref.extract(member, extract_path)
-                        progress = 80 + int((i + 1) / total_files * 10)
-                        self.progress_callback({
-                            "stage": "extracting",
-                            "progress": progress,
-                            "message": f"Extracting... {i+1}/{total_files} files"
-                        })
-            
+                        progress = 80 + int((i + 1) / len(members) * 10)
+                        self.progress_callback({"stage": "extracting", "progress": progress, "message": f"Extracting... {i+1}/{len(members)}"})
             else:  # tar.gz
                 with tarfile.open(archive_path, "r:gz") as tar_ref:
                     members = tar_ref.getmembers()
-                    total_files = len(members)
-                    
                     for i, member in enumerate(members):
                         with self._lock:
-                            if self.setup_cancelled:
-                                logger.info("Extraction cancelled")
-                                return
-                            
-                        tar_ref.extract(member, extract_path)
-                        progress = 80 + int((i + 1) / total_files * 10)
-                        self.progress_callback({
-                            "stage": "extracting",
-                            "progress": progress,
-                            "message": f"Extracting... {i+1}/{total_files} files"
-                        })
+                            if self.setup_cancelled: logger.info("Extraction cancelled"); return
+                        
+                        ## IMPROVEMENT: Security check for path traversal
+                        target_path = os.path.abspath(os.path.join(extract_path, member.name))
+                        if not target_path.startswith(abs_extract_path):
+                             raise SecurityException(f"Malicious archive detected: invalid path {member.name}")
 
-            self.progress_callback({
-                "stage": "extracting",
-                "progress": 90,
-                "message": "Extraction complete"
-            })
-            
-            logger.info(f"Extraction completed: {extract_path}")
-            
+                        tar_ref.extract(member, extract_path, numeric_owner=True)
+                        progress = 80 + int((i + 1) / len(members) * 10)
+                        self.progress_callback({"stage": "extracting", "progress": progress, "message": f"Extracting... {i+1}/{len(members)}"})
+            self.progress_callback({"stage": "extracting", "progress": 90, "message": "Extraction complete"})
         except Exception as e:
-            logger.error(f"Extraction failed: {e}")
             raise Exception(f"Extraction failed: {e}")
 
-    def start_server(self):
-        """Start server with proper process management."""
-        with self._lock:
-            if self.setup_cancelled:
-                return
+    ## ----- Major refactor of Process Management methods for safety and better diagnostics ----- ##
+
+    def _is_pid_running(self, pid):
+        """Check if a process with the given PID is running."""
+        if not pid: return False
+        try:
+            if platform.system() == "Windows":
+                # Find if the PID is in the output of tasklist
+                output = subprocess.check_output(['tasklist', '/FI', f'PID eq {pid}'], text=True)
+                return str(pid) in output
+            else:
+                # `ps -p` exits with 1 if the process doesn't exist
+                return subprocess.run(['ps', '-p', str(pid)], check=True, capture_output=True) is not None
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return False
+
+    def _kill_existing_server_by_pid(self):
+        """Safely stop a server process using its stored PID."""
+        if not os.path.exists(self.pid_path):
+            return
+        
+        try:
+            with open(self.pid_path, 'r') as f:
+                pid = int(f.read().strip())
             
-        self.progress_callback({
-            "stage": "starting",
-            "progress": 90,
-            "message": "Starting TTS server..."
-        })
+            if self._is_pid_running(pid):
+                logger.info(f"Found running server from PID file (PID: {pid}). Stopping it.")
+                if platform.system() == "Windows":
+                    subprocess.run(['taskkill', '/PID', str(pid), '/F'], check=False, capture_output=True)
+                else:
+                    subprocess.run(['kill', '-9', str(pid)], check=False)
+                logger.info(f"Killed existing process PID {pid}")
+        except (ValueError, FileNotFoundError):
+            pass # PID file is invalid or gone
+        except Exception as e:
+            logger.warning(f"Error while stopping server process from PID file: {e}")
+        finally:
+            self._safe_remove(self.pid_path)
+
+    def start_server(self):
+        with self._lock:
+            if self.setup_cancelled: return
+        self.progress_callback({"stage": "starting", "progress": 90, "message": "Starting TTS server..."})
 
         try:
-            # Kill any existing server process
-            self._kill_existing_server()
+            ## IMPROVEMENT: Use safer PID-based kill instead of port-based
+            self._kill_existing_server_by_pid()
 
             logger.info(f"Starting server: {self.executable_path}")
             
-            # Determine startup flags based on OS
-            startup_flags = {}
-            if platform.system() == "Windows":
-                startup_flags['creationflags'] = 0x08000000  # CREATE_NO_WINDOW
-            else:
-                startup_flags['close_fds'] = True
-                
-            # Start server process
+            startup_flags = {'creationflags': 0x08000000} if platform.system() == "Windows" else {'close_fds': True}
             cmd = [self.executable_path, "--host", "0.0.0.0", "--port", str(self.server_port)]
             
-            # Close existing log file if open
             self._close_log_file()
-            
-            # Open new log file
             self.log_file = open(self.log_path, 'w')
             
             with self._lock:
-                self.server_process = subprocess.Popen(
-                    cmd,
-                    stdout=self.log_file,
-                    stderr=subprocess.STDOUT,
-                    **startup_flags
-                )
+                self.server_process = subprocess.Popen(cmd, stdout=self.log_file, stderr=subprocess.STDOUT, **startup_flags)
+            
+            ## IMPROVEMENT: Store the new PID
+            with open(self.pid_path, 'w') as f:
+                f.write(str(self.server_process.pid))
 
             logger.info(f"Server started with PID: {self.server_process.pid}")
 
-            # Wait for server to be ready
             if self._wait_for_server_ready():
-                self.progress_callback({
-                    "stage": "complete",
-                    "progress": 100,
-                    "message": f"Server started successfully on port {self.server_port}"
-                })
+                self.progress_callback({"stage": "complete", "progress": 100, "message": f"Server started on port {self.server_port}"})
             else:
-                raise Exception("Server failed to become ready")
+                # This path is now covered by the exception from _wait_for_server_ready
+                pass
 
         except Exception as e:
             logger.error(f"Failed to start server: {e}")
             self._close_log_file()
-            self.progress_callback({
-                "stage": "error",
-                "progress": 0,
-                "message": "Failed to start server",
-                "error": str(e)
-            })
+            self.progress_callback({"stage": "error", "progress": 0, "message": "Failed to start server", "error": str(e)})
 
     def stop_server(self):
-        """Stop the running server."""
         with self._lock:
             if not self.server_process:
+                # If we don't have a process object, fall back to killing by PID file
+                self._kill_existing_server_by_pid()
                 return
-            
             process = self.server_process
             self.server_process = None
         
@@ -1326,118 +1183,67 @@ class LocalServerManager:
         except subprocess.TimeoutExpired:
             process.kill()
             logger.info("Local server forcefully stopped")
-        except Exception as e:
-            logger.error(f"Failed to stop local server: {e}")
         
-        # Close log file
         self._close_log_file()
+        self._safe_remove(self.pid_path)
 
-    def _close_log_file(self):
-        """Safely close the log file."""
-        if self.log_file and not self.log_file.closed:
-            try:
-                self.log_file.close()
-                self.log_file = None
-            except Exception as e:
-                logger.warning(f"Failed to close log file: {e}")
-
-    def _cleanup_resources(self):
-        """Cleanup resources on exit."""
-        self.stop_server()
-
-    def _kill_existing_server(self):
-        """Kill any existing server processes on the target port."""
-        try:
-            if platform.system() == "Windows":
-                result = subprocess.run(
-                    f'netstat -ano | findstr :{self.server_port}',
-                    shell=True, 
-                    capture_output=True, 
-                    text=True
-                )
-                if result.stdout:
-                    lines = result.stdout.strip().split('\n')
-                    for line in lines:
-                        if 'LISTENING' in line:
-                            parts = line.split()
-                            if parts:
-                                pid = parts[-1]
-                                try:
-                                    subprocess.run(
-                                        f'taskkill /PID {pid} /F', 
-                                        shell=True,
-                                        check=False,
-                                        capture_output=True
-                                    )
-                                    logger.info(f"Killed existing process PID {pid}")
-                                except Exception as e:
-                                    logger.warning(f"Failed to kill PID {pid}: {e}")
-            else:
-                try:
-                    result = subprocess.run(
-                        ['lsof', '-ti', f'tcp:{self.server_port}'],
-                        capture_output=True, 
-                        text=True
-                    )
-                    if result.stdout:
-                        pids = result.stdout.strip().split('\n')
-                        for pid in pids:
-                            if pid:
-                                try:
-                                    subprocess.run(['kill', '-9', pid], check=False)
-                                    logger.info(f"Killed existing process PID {pid}")
-                                except Exception as e:
-                                    logger.warning(f"Failed to kill PID {pid}: {e}")
-                except FileNotFoundError:
-                    logger.warning("lsof not available, skipping port cleanup")
-        except Exception as e:
-            logger.warning(f"Failed to kill existing server: {e}")
-
-    def _wait_for_server_ready(self, timeout=600):
-        """Wait for server to be ready with health checks (reduced timeout)."""
+    def _wait_for_server_ready(self, timeout=120):
+        ## IMPROVEMENT: Reduced timeout and better diagnostics on failure
         start_time = time.time()
         
         while time.time() - start_time < timeout:
             with self._lock:
-                if self.setup_cancelled:
-                    return False
-                
-                # Check if process is still running
+                if self.setup_cancelled: return False
+                # Check if process died
                 if self.server_process and self.server_process.poll() is not None:
-                    logger.error("Server process terminated unexpectedly")
-                    return False
+                    self._close_log_file() # Flush logs
+                    log_tail = ""
+                    try:
+                        with open(self.log_path, 'r') as f:
+                            log_tail = "".join(f.readlines()[-10:])
+                    except Exception:
+                        log_tail = "Could not read log file for details."
+                    raise ServerStartupError(f"Server process terminated unexpectedly.\n\nLOGS:\n{log_tail}")
             
-            try:
-                response = requests.get(
-                    f'http://localhost:{self.server_port}/health',
-                    timeout=5
-                )
-                if response.status_code == 200:
-                    logger.info("Server health check passed")
-                    return True
-                    
-            except requests.exceptions.RequestException:
-                pass
+            try: # Health check
+                if requests.get(f'http://localhost:{self.server_port}/health', timeout=2).status_code == 200:
+                    logger.info("Server health check passed"); return True
+            except requests.exceptions.RequestException: pass
             
             elapsed = int(time.time() - start_time)
-            self.progress_callback({
-                "stage": "starting",
-                "progress": min(90 + int((elapsed / timeout) * 10), 99),
-                "message": f"Waiting for server... ({elapsed}s/{timeout}s)"
-            })
-            
+            self.progress_callback({"stage": "starting", "progress": min(90 + int((elapsed / timeout) * 10), 99), "message": f"Waiting for server... ({elapsed}s)"})
             time.sleep(2)
         
-        logger.error(f"Server failed to become ready within {timeout} seconds")
-        return False
-         
+        raise ServerStartupError(f"Server failed to become ready within {timeout} seconds.")
+    
+    ## ----- Unchanged Helper Methods ----- ##
+    def _verify_download(self, file_path):
+        if not os.path.exists(file_path): raise FileNotFoundError(f"File not found: {file_path}")
+        if os.path.getsize(file_path) < 1024 * 1024: raise ValueError("Downloaded file is suspiciously small.")
+        logger.info(f"Download verified: {file_path}")
+    def _cleanup_partial_download(self, archive_path):
+        self._safe_remove(archive_path); self.progress_callback({"stage": "error", "message": "Setup cancelled by user"})
+    def _safe_remove(self, file_path):
+        try:
+            if os.path.exists(file_path): os.remove(file_path); logger.info(f"Removed: {file_path}")
+        except Exception as e: logger.warning(f"Failed to remove {file_path}: {e}")
+    def _locate_executable(self):
+        if os.path.exists(self.executable_path): return
+        for root, _, files in os.walk(self.install_path):
+            if self.executable_name in files: self.executable_path = os.path.join(root, self.executable_name); return
+        raise FileNotFoundError(f"Executable '{self.executable_name}' not found after extraction")
+    def _test_existing_installation(self, executable_path):
+        try: return subprocess.run([executable_path, "--version"], capture_output=True, text=True, timeout=30).returncode == 0
+        except Exception as e: logger.warning(f"Failed to test existing installation: {e}"); return False
+    def _close_log_file(self):
+        if self.log_file and not self.log_file.closed: self.log_file.close(); self.log_file = None
+    def _cleanup_resources(self): self.stop_server()         
 class Api:
     """PyWebView API class for exposing Python functions to JavaScript."""
     
     def __init__(self):
         self.processor = AudioProcessor()
         self.detector = HardwareDetector()
-        self._hardware_info = self.detector.detect_hardware()
         self._active_runpod_instance: Optional[Dict[str, str]] = None
         self.local_server_manager = LocalServerManager(self.send_progress_to_js)
         self.window = None
@@ -1463,7 +1269,7 @@ class Api:
     
     def get_hardware_info(self) -> Dict[str, Any]:
         """Return cached hardware information (detected at startup)."""
-        return self._hardware_info
+        return self.detector.detect_hardware()
 
     def send_progress_to_js(self, progress_data):
         """Enhanced progress reporting with error handling."""
@@ -1737,6 +1543,74 @@ class Api:
                 "traceback": traceback.format_exc()
             }
                   
+    def select_csv_file(self):
+        """Open native file picker for CSV selection"""
+        result = webview.windows[0].create_file_dialog(
+            webview.OPEN_DIALOG,
+            allow_multiple=False,
+            file_types=('CSV Files (*.csv)', 'All Files (*.*)')
+        )
+        
+        if result and len(result) > 0:
+            file_path = result[0]
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                return {
+                    'success': True,
+                    'filename': os.path.basename(file_path),
+                    'content': content,
+                    'path': file_path
+                }
+            except Exception as e:
+                return {
+                    'success': False,
+                    'error': str(e)
+                }
+        
+        return {'success': False, 'error': 'No file selected'}
+    
+    def save_sample_csv(self, content):
+        """Save sample CSV and return path without opening"""
+        try:
+            # Create temp directory if it doesn't exist
+            temp_dir = tempfile.gettempdir()
+            file_path = os.path.join(temp_dir, 'sample-bulk-generation.csv')
+            
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            
+            return {
+                'success': True,
+                'path': file_path,
+                'message': f'Sample CSV saved to: {file_path}'
+            }
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e)
+            }
+    
+    def open_file_location(self, file_path):
+        """Open file explorer at the file location"""
+        try:
+            if os.name == 'nt':  # Windows
+                os.startfile(os.path.dirname(file_path))
+            elif os.name == 'posix':  # macOS and Linux
+                import subprocess
+                if os.uname().sysname == 'Darwin':  # macOS
+                    subprocess.Popen(['open', '-R', file_path])
+                else:  # Linux
+                    subprocess.Popen(['xdg-open', os.path.dirname(file_path)])
+            
+            return {'success': True}
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e)
+            }
+
+    
     def cleanup_on_exit(self):
         """
         Cleanup when app is closing
@@ -1808,40 +1682,52 @@ def terminate_runpod_instance(api_key, pod_id):
     return data["data"]["podTerminate"]
 
 def show_help_window():
-    # This is one way to show help - in a new window.
-    # See the next section for more options.
-    help_html_path = resource_path("out/help.html") # Assuming you create this file
-    webview.create_window('Help Guide', help_html_path, width=800, height=600)
+    """Show help guide in a new window with OS detection built-in"""
+    help_html_path = resource_path("out/help/help-main.html")
+    
+    # Create a new window for help
+    help_window = webview.create_window(
+        'DeepFak3r Vibe Voice - Help Guide',
+        help_html_path,
+        width=900,
+        height=700,
+        resizable=True,
+        min_size=(600, 400)
+    )
+    
+    return help_window
 
-if __name__ == '__main__':
-    try:
-        api = Api()
-        
-        menu_items = [
+def start_main_app():
+    """Start main app"""
+    
+    # Your existing window creation code here
+    api = Api()
+    menu_items = [
             Menu(
                 'File',
                 [
-                    MenuAction('Close', api.cleanup_on_exit), 
+                    MenuAction('Close', api.cleanup_on_exit),
                     MenuAction('Exit', api.cleanup_on_exit)
                 ]
             ),
             Menu(
                 'Help',
                 [
-                    # Here we call a regular Python function
+                    # Show help window when clicked
                     MenuAction('How to Use This App', show_help_window),
-                    MenuAction('About', lambda: api.window.evaluate_js('alert("DeepFak3r VibeVoice v1.0")'))
+                    MenuAction('About', lambda: api.window.evaluate_js(
+                        'alert("DeepFak3r VibeVoice v1.0\\n\\nFor support: support@deepfak3r.com")'
+                    ))
                 ]
             )
         ]
-
         
         # Create window with proper configuration
-        index_path = resource_path("out/index.html")
+    index_path = resource_path("out/index.html")
         
-        webview.settings['OPEN_EXTERNAL_LINKS_IN_BROWSER'] = True
+    webview.settings['OPEN_EXTERNAL_LINKS_IN_BROWSER'] = True
 
-        window = webview.create_window(
+    window = webview.create_window(
             'DeepFak3r VibeVoice',
             index_path,
             js_api=api,
@@ -1855,16 +1741,22 @@ if __name__ == '__main__':
             menu=menu_items
         )
         
-        # Set window reference for API
-        api.set_window(window)
+    # Set window reference for API
+    api.set_window(window)
         
-        # Register close event
-        window.events.closing += on_closing
+    # Register close event
+    window.events.closing += on_closing
         
-        # Start the webview
-        logger.info("Starting webview application...")
-        webview.start(debug=False,private_mode=False,storage_path=data_path)
+    # Start the webview
+    webview.start(debug=False,private_mode=False,storage_path=data_path)
+    
+
+
+if __name__ == '__main__':
+    try:
+        start_main_app()
         
     except Exception as e:
+        traceback.print_exc()
         logger.error(f"Failed to start application: {e}", exc_info=True)
         exit(1)

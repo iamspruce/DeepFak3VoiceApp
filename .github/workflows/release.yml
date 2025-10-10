@@ -48,7 +48,7 @@ jobs:
 
       - name: Build with PyInstaller for Universal2
         run: |
-          pyinstaller --onefile --windowed --name DeepFak3rVoice --icon app.icns --add-data 'out:out' --target-arch universal2 main.py
+          pyinstaller --onedir --windowed --name DeepFak3rVoice --icon app.icns --add-data 'out:out' --target-arch universal2 main.py
 
       - name: Sign macOS App
         run: |
@@ -124,7 +124,7 @@ jobs:
           asset_content_type: application/octet-stream
 
   build-windows:
-    name: Build and Sign Windows EXE
+    name: Build and Sign Windows Installer
     needs: create-release
     runs-on: windows-latest
     steps:
@@ -142,7 +142,7 @@ jobs:
 
       - name: Build with PyInstaller
         run: |
-          pyinstaller --onefile --windowed --name DeepFak3rVoice --icon app.ico --add-data "out;out" main.py
+          pyinstaller --onedir --windowed --name DeepFak3rVoice --icon app.ico --add-data "out;out" main.py
 
       - name: Sign Windows Executable
         run: |
@@ -152,7 +152,76 @@ jobs:
           $sdk_dir = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Filter "signtool.exe" -Recurse | Select-Object -Last 1).DirectoryName
           $signtool_path = Join-Path $sdk_dir "signtool.exe"
 
-          & $signtool_path sign /f $cert_pfx_path /p "${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}" /tr http://timestamp.digicert.com /td sha256 /fd sha256 "dist/DeepFak3rVoice.exe"
+          & $signtool_path sign /f $cert_pfx_path /p "${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}" /tr http://timestamp.digicert.com /td sha256 /fd sha256 "dist/DeepFak3rVoice/DeepFak3rVoice.exe"
+        shell: pwsh
+        env:
+          SIGNING_CERTIFICATE_BASE64: ${{ secrets.SIGNING_CERTIFICATE_BASE64 }}
+          SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}
+
+      - name: Create Inno Setup Script
+        run: |
+          @"
+          #define MyAppName "DeepFak3rVoice"
+          #define MyAppVersion "${{ github.ref_name }}"
+          #define MyAppPublisher "Your Company Name"
+          #define MyAppExeName "DeepFak3rVoice.exe"
+
+          [Setup]
+          AppId={{YOUR-GUID-HERE}
+          AppName={#MyAppName}
+          AppVersion={#MyAppVersion}
+          AppPublisher={#MyAppPublisher}
+          DefaultDirName={autopf}\{#MyAppName}
+          DefaultGroupName={#MyAppName}
+          AllowNoIcons=yes
+          OutputDir=installer
+          OutputBaseFilename=DeepFak3rVoice-Setup
+          Compression=lzma
+          SolidCompression=yes
+          WizardStyle=modern
+          SetupIconFile=app.ico
+          UninstallDisplayIcon={app}\{#MyAppExeName}
+          ArchitecturesInstallIn64BitMode=x64
+
+          [Languages]
+          Name: "english"; MessagesFile: "compiler:Default.isl"
+
+          [Tasks]
+          Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+
+          [Files]
+          Source: "dist\DeepFak3rVoice\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+          [Icons]
+          Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+          Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
+          Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+          [Run]
+          Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+          "@ | Out-File -FilePath setup.iss -Encoding UTF8
+        shell: pwsh
+
+      - name: Install Inno Setup
+        run: |
+          choco install innosetup -y
+
+      - name: Build Installer
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
+        shell: pwsh
+
+      - name: Sign Installer
+        run: |
+          $cert_pfx_path = "certificate.pfx"
+          [IO.File]::WriteAllBytes($cert_pfx_path, [System.Convert]::FromBase64String("${{ secrets.SIGNING_CERTIFICATE_BASE64 }}"))
+
+          $sdk_dir = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Filter "signtool.exe" -Recurse | Select-Object -Last 1).DirectoryName
+          $signtool_path = Join-Path $sdk_dir "signtool.exe"
+
+          & $signtool_path sign /f $cert_pfx_path /p "${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}" /tr http://timestamp.digicert.com /td sha256 /fd sha256 "installer/DeepFak3rVoice-Setup.exe"
+
+          Remove-Item $cert_pfx_path
         shell: pwsh
         env:
           SIGNING_CERTIFICATE_BASE64: ${{ secrets.SIGNING_CERTIFICATE_BASE64 }}
@@ -164,14 +233,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: dist/DeepFak3rVoice.exe
-          asset_name: DeepFak3rVoice-Windows-x64.exe
+          asset_path: installer/DeepFak3rVoice-Setup.exe
+          asset_name: DeepFak3rVoice-Windows-Setup.exe
           asset_content_type: application/vnd.microsoft.portable-executable
 
   build-linux:
-    name: Build Linux Executable
+    name: Build Linux AppImage
     needs: create-release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v4
 
@@ -183,7 +252,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y portaudio19-dev
+          sudo apt-get install -y portaudio19-dev libfuse2 file
 
       - name: Install Python dependencies
         run: |
@@ -192,11 +261,60 @@ jobs:
 
       - name: Build with PyInstaller
         run: |
-          pyinstaller --onefile --name DeepFak3rVoice --add-data 'out:out' main.py
+          pyinstaller --onedir --name DeepFak3rVoice --add-data 'out:out' main.py
 
-      - name: Package for release
+      - name: Download appimagetool
         run: |
-          tar -czvf DeepFak3rVoice-Linux.tar.gz -C dist DeepFak3rVoice
+          wget https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool-x86_64.AppImage
+
+      - name: Create AppDir structure
+        run: |
+          mkdir -p AppDir/usr/bin
+          mkdir -p AppDir/usr/share/applications
+          mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
+
+          # Copy the application
+          cp -r dist/DeepFak3rVoice/* AppDir/usr/bin/
+
+          # Copy the PNG icon
+          cp app.png AppDir/usr/share/icons/hicolor/256x256/apps/deepfak3rvoice.png
+
+          # Create desktop entry
+          cat > AppDir/usr/share/applications/deepfak3rvoice.desktop << 'EOF'
+          [Desktop Entry]
+          Name=DeepFak3rVoice
+          Exec=DeepFak3rVoice
+          Icon=deepfak3rvoice
+          Type=Application
+          Categories=Audio;AudioVideo;
+          Comment=Voice manipulation application
+          Terminal=false
+          EOF
+
+          # Create AppRun script
+          cat > AppDir/AppRun << 'EOF'
+          #!/bin/bash
+          SELF=$(readlink -f "$0")
+          HERE=${SELF%/*}
+          export PATH="${HERE}/usr/bin/:${PATH}"
+          export LD_LIBRARY_PATH="${HERE}/usr/lib/:${LD_LIBRARY_PATH}"
+          cd "${HERE}/usr/bin"
+          exec ./DeepFak3rVoice "$@"
+          EOF
+
+          chmod +x AppDir/AppRun
+
+          # Copy desktop file and icon to root of AppDir
+          cp AppDir/usr/share/applications/deepfak3rvoice.desktop AppDir/
+          cp AppDir/usr/share/icons/hicolor/256x256/apps/deepfak3rvoice.png AppDir/deepfak3rvoice.png
+
+      - name: Build AppImage
+        run: |
+          ./appimagetool-x86_64.AppImage AppDir DeepFak3rVoice-x86_64.AppImage
+
+      - name: Make AppImage executable
+        run: chmod +x DeepFak3rVoice-x86_64.AppImage
 
       - name: Upload Release Asset
         uses: actions/upload-release-asset@v1
@@ -204,6 +322,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./DeepFak3rVoice-Linux.tar.gz
-          asset_name: DeepFak3rVoice-Linux-x86_64.tar.gz
-          asset_content_type: application/gzip
+          asset_path: ./DeepFak3rVoice-x86_64.AppImage
+          asset_name: DeepFak3rVoice-Linux-x86_64.AppImage
+          asset_content_type: application/octet-stream

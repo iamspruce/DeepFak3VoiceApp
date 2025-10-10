@@ -1,0 +1,88 @@
+<div class="install-guide">
+  <h2>🐧 Installing on Linux</h2>
+  <p>Works on Ubuntu, Fedora, Arch, and most other distributions.</p>
+
+  <div class="step">
+    <h3>Step 1: Extract the App</h3>
+    <h4>Using File Manager:</h4>
+    <ol>
+      <li>
+        Find the <code>DeepFak3rVoice-Linux.tar.gz</code> file in your downloads
+      </li>
+      <li>
+        <strong>Right-click</strong> and choose <strong>"Extract Here"</strong>
+      </li>
+      <li>
+        You'll see a folder with the <code>DeepFak3rVoice</code> file inside
+      </li>
+    </ol>
+
+    <h4>Using Terminal:</h4>
+    <pre><code>cd ~/Downloads
+tar -xzf DeepFak3rVoice-Linux.tar.gz
+cd DeepFak3rVoice</code></pre>
+  </div>
+
+  <div class="step">
+    <h3>Step 2: Make It Executable</h3>
+    <h4>Using File Manager:</h4>
+    <ol>
+      <li><strong>Right-click</strong> the <code>DeepFak3rVoice</code> file</li>
+      <li>Choose <strong>"Properties"</strong></li>
+      <li>Go to the <strong>"Permissions"</strong> tab</li>
+      <li>Check the box: <strong>"Allow executing file as program"</strong></li>
+      <li>Close the window</li>
+    </ol>
+
+    <h4>Using Terminal:</h4>
+    <pre><code>chmod +x DeepFak3rVoice</code></pre>
+  </div>
+
+  <div class="step">
+    <h3>Step 3: Run the App</h3>
+    <h4>Using File Manager:</h4>
+    <p><strong>Double-click</strong> the <code>DeepFak3rVoice</code> file</p>
+
+    <h4>Using Terminal:</h4>
+    <pre><code>./DeepFak3rVoice</code></pre>
+  </div>
+
+  <div class="step">
+    <h3>Step 4: Enter Your License Key</h3>
+    <ol>
+      <li>The app shows a license activation screen</li>
+      <li><strong>Open your Gumroad purchase email</strong></li>
+      <li>Copy the license key</li>
+      <li><strong>Paste it</strong> into the app</li>
+      <li>Click <strong>"Activate"</strong></li>
+    </ol>
+  </div>
+
+  <div class="tip"><strong>✅ Done!</strong> The app is ready to use!</div>
+
+  <div class="note">
+    <strong>💡 Optional:</strong> Create a desktop shortcut or add to your
+    application menu
+    <p>
+      For Ubuntu/GNOME, create
+      <code>~/.local/share/applications/deepfak3r.desktop</code>:
+    </p>
+    <pre><code>[Desktop Entry]
+Name=DeepFak3r Vibe Voice
+Exec=/path/to/DeepFak3rVoice
+Icon=/path/to/icon.png
+Type=Application
+Categories=AudioVideo;Audio;</code></pre>
+  </div>
+
+  <div class="important">
+    <strong>⚠️ Dependencies:</strong> If the app doesn't start, you may need to
+    install some libraries:
+    <p><strong>Ubuntu/Debian:</strong></p>
+    <pre><code>sudo apt install libgtk-3-0 libwebkit2gtk-4.0-37</code></pre>
+    <p><strong>Fedora:</strong></p>
+    <pre><code>sudo dnf install gtk3 webkit2gtk3</code></pre>
+    <p><strong>Arch:</strong></p>
+    <pre><code>sudo pacman -S gtk3 webkit2gtk</code></pre>
+  </div>
+</div>
