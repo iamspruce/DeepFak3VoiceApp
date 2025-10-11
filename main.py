@@ -22,8 +22,6 @@ import time
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 import atexit
-from pydub import AudioSegment
-from pydub.effects import normalize
 import base64
 from appdirs import user_data_dir
 import traceback
@@ -58,15 +56,47 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+try:
+    from pydub import AudioSegment
+    from pydub.effects import normalize
+    PYDUB_AVAILABLE = True
+except ImportError:
+    PYDUB_AVAILABLE = False
+
+# Check if FFmpeg is available
+FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None
+
+
 class AudioProcessor:
     """Handles advanced audio processing operations"""
     
     @staticmethod
+    def check_dependencies() -> Dict[str, bool]:
+        """Check which audio processing dependencies are available"""
+        return {
+            "pydub": PYDUB_AVAILABLE,
+            "ffmpeg": FFMPEG_AVAILABLE
+        }
+    
+    @staticmethod
     def base64_to_audio(base64_data: str, format: str = "wav") -> AudioSegment:
         """Convert base64 encoded audio to AudioSegment"""
+        if not PYDUB_AVAILABLE:
+            raise ImportError("pydub is not installed")
+        
         audio_bytes = base64.b64decode(base64_data)
         audio_io = io.BytesIO(audio_bytes)
-        return AudioSegment.from_file(audio_io, format=format)
+        
+        # Try to detect format if loading fails
+        try:
+            return AudioSegment.from_file(audio_io, format=format)
+        except Exception as e:
+            # Try without specifying format (let pydub auto-detect)
+            audio_io.seek(0)
+            try:
+                return AudioSegment.from_file(audio_io)
+            except Exception as e2:
+                raise Exception(f"Failed to load audio. Format specified: {format}. Errors: {str(e)}, {str(e2)}")
     
     @staticmethod
     def audio_to_base64(audio: AudioSegment, format: str = "wav") -> str:
@@ -75,6 +105,50 @@ class AudioProcessor:
         audio.export(buffer, format=format)
         buffer.seek(0)
         return base64.b64encode(buffer.read()).decode('utf-8')
+    
+    def simple_export(
+        self,
+        main_audio: str,
+        output_filename: str,
+        format: str = "wav"
+    ) -> Dict[str, Any]:
+        """
+        Simple export without processing (no FFmpeg required for WAV)
+        
+        Args:
+            main_audio: Base64 encoded audio data
+            output_filename: Name for the output file
+            format: Output format (only 'wav' works without FFmpeg)
+            
+        Returns:
+            Dict with success status and file path or error message
+        """
+        try:
+            # Decode base64 audio
+            audio_bytes = base64.b64decode(main_audio)
+            
+            # Determine output path
+            output_dir = os.path.expanduser("~/Downloads")
+            os.makedirs(output_dir, exist_ok=True)
+            output_path = os.path.join(output_dir, output_filename)
+            
+            # Write raw audio bytes to file
+            with open(output_path, 'wb') as f:
+                f.write(audio_bytes)
+            
+            return {
+                "success": True,
+                "file_path": output_path,
+                "message": f"Audio exported successfully to {output_path}",
+                "method": "simple"
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "message": f"Failed to export audio: {str(e)}"
+            }
     
     def export_audio(
         self,
@@ -90,6 +164,7 @@ class AudioProcessor:
     ) -> Dict[str, Any]:
         """
         Export audio with advanced options including mixing and format conversion
+        Falls back to simple export if FFmpeg is not available
         
         Args:
             main_audio: Base64 encoded main audio
@@ -105,83 +180,147 @@ class AudioProcessor:
         Returns:
             Dict with success status and file path or error message
         """
+        # Check if advanced features are requested
+        needs_processing = any([
+            background_music is not None,
+            intro is not None,
+            outro is not None,
+            format != "wav",
+            sample_rate != 44100  # Assuming default sample rate
+        ])
+        
+        # If no processing needed, use simple export
+        if not needs_processing:
+            return self.simple_export(main_audio, output_filename, format)
+        
+        # Check dependencies for advanced processing
+        if not PYDUB_AVAILABLE:
+            return {
+                "success": False,
+                "error": "pydub is not installed",
+                "message": "Advanced audio processing requires pydub. Using simple export instead.",
+                "fallback_available": True
+            }
+        
+        if not FFMPEG_AVAILABLE and (format != "wav" or needs_processing):
+            # Fall back to simple export with a warning
+            result = self.simple_export(main_audio, output_filename.replace(f".{format}", ".wav"), "wav")
+            if result["success"]:
+                result["message"] += " (Note: Advanced features require FFmpeg. File exported as WAV.)"
+                result["warning"] = "FFmpeg not found. Some features were disabled."
+            return result
+        
         try:
-            # Load main audio
-            main = self.base64_to_audio(main_audio, "webm")
+            # Try to detect the input format
+            # Most browsers use webm or wav for MediaRecorder
+            input_formats_to_try = ["wav", "webm", "ogg"]
+            main = None
+            
+            for input_format in input_formats_to_try:
+                try:
+                    main = self.base64_to_audio(main_audio, input_format)
+                    break
+                except Exception:
+                    continue
+            
+            if main is None:
+                # Last attempt: let pydub auto-detect
+                audio_bytes = base64.b64decode(main_audio)
+                audio_io = io.BytesIO(audio_bytes)
+                main = AudioSegment.from_file(audio_io)
             
             # Set sample rate
             main = main.set_frame_rate(sample_rate)
             
             # Add intro if provided
             if intro:
-                intro_audio = self.base64_to_audio(intro)
-                intro_audio = intro_audio.set_frame_rate(sample_rate)
-                main = intro_audio + main
+                try:
+                    intro_audio = self.base64_to_audio(intro)
+                    intro_audio = intro_audio.set_frame_rate(sample_rate)
+                    main = intro_audio + main
+                except Exception as e:
+                    print(f"Warning: Failed to add intro: {e}")
             
             # Add outro if provided
             if outro:
-                outro_audio = self.base64_to_audio(outro)
-                outro_audio = outro_audio.set_frame_rate(sample_rate)
-                main = main + outro_audio
+                try:
+                    outro_audio = self.base64_to_audio(outro)
+                    outro_audio = outro_audio.set_frame_rate(sample_rate)
+                    main = main + outro_audio
+                except Exception as e:
+                    print(f"Warning: Failed to add outro: {e}")
             
             # Mix with background music if provided
             if background_music:
-                bg = self.base64_to_audio(background_music)
-                bg = bg.set_frame_rate(sample_rate)
-                
-                # Adjust background volume
-                bg = bg - (20 * (1 - background_volume))  # Reduce volume
-                
-                # Loop background music if it's shorter than main audio
-                if len(bg) < len(main):
-                    loops_needed = (len(main) // len(bg)) + 1
-                    bg = bg * loops_needed
-                
-                # Trim background to match main audio length
-                bg = bg[:len(main)]
-                
-                # Mix the audio
-                main = main.overlay(bg)
+                try:
+                    bg = self.base64_to_audio(background_music)
+                    bg = bg.set_frame_rate(sample_rate)
+                    
+                    # Adjust background volume (convert 0-1 to dB reduction)
+                    volume_reduction = 20 * (1 - background_volume)
+                    bg = bg - volume_reduction
+                    
+                    # Loop background music if it's shorter than main audio
+                    if len(bg) < len(main):
+                        loops_needed = (len(main) // len(bg)) + 1
+                        bg = bg * loops_needed
+                    
+                    # Trim background to match main audio length
+                    bg = bg[:len(main)]
+                    
+                    # Mix the audio
+                    main = main.overlay(bg)
+                except Exception as e:
+                    print(f"Warning: Failed to add background music: {e}")
             
             # Normalize audio
-            main = normalize(main)
+            try:
+                main = normalize(main)
+            except Exception as e:
+                print(f"Warning: Failed to normalize audio: {e}")
             
             # Determine output path
             output_dir = os.path.expanduser("~/Downloads")
+            os.makedirs(output_dir, exist_ok=True)
             output_path = os.path.join(output_dir, output_filename)
             
             # Export with appropriate settings
+            export_params = {"format": format}
+            
             if format == "mp3":
-                main.export(
-                    output_path,
-                    format="mp3",
-                    bitrate=f"{bitrate}k",
-                    parameters=["-q:a", "0"]
-                )
+                export_params.update({
+                    "bitrate": f"{bitrate}k",
+                    "parameters": ["-q:a", "0"]
+                })
             elif format == "ogg":
-                main.export(
-                    output_path,
-                    format="ogg",
-                    bitrate=f"{bitrate}k"
-                )
-            else:  # wav
-                main.export(
-                    output_path,
-                    format="wav"
-                )
+                export_params.update({
+                    "bitrate": f"{bitrate}k"
+                })
+            
+            main.export(output_path, **export_params)
             
             return {
                 "success": True,
                 "file_path": output_path,
-                "message": f"Audio exported successfully to {output_path}"
+                "message": f"Audio exported successfully to {output_path}",
+                "method": "advanced"
             }
             
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e),
-                "message": f"Failed to export audio: {str(e)}"
-            }
+            # Try fallback to simple export
+            print(f"Advanced export failed: {e}. Attempting simple export...")
+            fallback_result = self.simple_export(
+                main_audio, 
+                output_filename.replace(f".{format}", ".wav"),
+                "wav"
+            )
+            
+            if fallback_result["success"]:
+                fallback_result["warning"] = f"Advanced export failed: {str(e)}. Saved as basic WAV file."
+            else:
+                fallback_result["error"] = f"Both advanced and simple export failed. Original error: {str(e)}"
+            
+            return fallback_result
     
     def trim_audio(
         self,
@@ -202,6 +341,12 @@ class AudioProcessor:
         Returns:
             Dict with success status and trimmed audio data
         """
+        if not PYDUB_AVAILABLE:
+            return {
+                "success": False,
+                "error": "pydub is not installed. Trimming requires pydub."
+            }
+        
         try:
             audio = self.base64_to_audio(audio_data, format)
             
@@ -246,6 +391,18 @@ class AudioProcessor:
         Returns:
             Dict with success status and converted audio data
         """
+        if not PYDUB_AVAILABLE:
+            return {
+                "success": False,
+                "error": "pydub is not installed. Format conversion requires pydub."
+            }
+        
+        if not FFMPEG_AVAILABLE and output_format != "wav":
+            return {
+                "success": False,
+                "error": f"FFmpeg is required for {output_format} format conversion."
+            }
+        
         try:
             audio = self.base64_to_audio(audio_data, input_format)
             
@@ -272,7 +429,7 @@ class AudioProcessor:
                 "success": False,
                 "error": str(e)
             }
-
+            
 class HardwareDetector:
     """Detects system hardware with robust multi-vendor GPU support."""
     
@@ -1187,8 +1344,8 @@ class LocalServerManager:
         self._close_log_file()
         self._safe_remove(self.pid_path)
 
-    def _wait_for_server_ready(self, timeout=120):
-        ## IMPROVEMENT: Reduced timeout and better diagnostics on failure
+    def _wait_for_server_ready(self, timeout=600):
+       
         start_time = time.time()
         
         while time.time() - start_time < timeout:
@@ -1238,6 +1395,7 @@ class LocalServerManager:
     def _close_log_file(self):
         if self.log_file and not self.log_file.closed: self.log_file.close(); self.log_file = None
     def _cleanup_resources(self): self.stop_server()         
+
 class Api:
     """PyWebView API class for exposing Python functions to JavaScript."""
     
@@ -1609,7 +1767,6 @@ class Api:
                 'success': False,
                 'error': str(e)
             }
-
     
     def cleanup_on_exit(self):
         """
@@ -1649,10 +1806,10 @@ def on_closing():
 def terminate_runpod_instance(api_key, pod_id):
    
     """Terminate RunPod instance via GraphQL API."""
-    url = "https://api.runpod.ai/graphql"
+    url = "https://api.runpod.io/graphql"
     
     query = """
-    mutation terminatePod($input: PodTerminateInput!) {
+    mutation podTerminate($input: PodTerminateInput!) {
         podTerminate(input: $input) {
             id
         }
@@ -1683,11 +1840,11 @@ def terminate_runpod_instance(api_key, pod_id):
 
 def show_help_window():
     """Show help guide in a new window with OS detection built-in"""
-    help_html_path = resource_path("out/help/help-main.html")
+    help_html_path = resource_path("out/help-main.html")
     
     # Create a new window for help
     help_window = webview.create_window(
-        'DeepFak3r Vibe Voice - Help Guide',
+        'DeepFak3r VibeVoice - Help Guide',
         help_html_path,
         width=900,
         height=700,
@@ -1695,65 +1852,58 @@ def show_help_window():
         min_size=(600, 400)
     )
     
-    return help_window
-
-def start_main_app():
-    """Start main app"""
-    
-    # Your existing window creation code here
-    api = Api()
-    menu_items = [
-            Menu(
-                'File',
-                [
-                    MenuAction('Close', api.cleanup_on_exit),
-                    MenuAction('Exit', api.cleanup_on_exit)
-                ]
-            ),
-            Menu(
-                'Help',
-                [
-                    # Show help window when clicked
-                    MenuAction('How to Use This App', show_help_window),
-                    MenuAction('About', lambda: api.window.evaluate_js(
-                        'alert("DeepFak3r VibeVoice v1.0\\n\\nFor support: support@deepfak3r.com")'
-                    ))
-                ]
-            )
-        ]
-        
-        # Create window with proper configuration
-    index_path = resource_path("out/index.html")
-        
-    webview.settings['OPEN_EXTERNAL_LINKS_IN_BROWSER'] = True
-
-    window = webview.create_window(
-            'DeepFak3r VibeVoice',
-            index_path,
-            js_api=api,
-            width=1200,
-            height=800,
-            min_size=(800, 600),
-            resizable=True,
-            shadow=True,
-            on_top=False,
-            confirm_close=True,
-            menu=menu_items
-        )
-        
-    # Set window reference for API
-    api.set_window(window)
-        
-    # Register close event
-    window.events.closing += on_closing
-        
-    # Start the webview
-    webview.start(debug=False,private_mode=False,storage_path=data_path)
-    
+    return help_window    
 
 if __name__ == '__main__':
     try:
-        start_main_app()
+            api = Api()
+            menu_items = [
+                    Menu(
+                        'File',
+                        [
+                            MenuAction('Close', api.cleanup_on_exit),
+                            MenuAction('Exit', api.cleanup_on_exit)
+                        ]
+                    ),
+                    Menu(
+                        'Help',
+                        [
+                            # Show help window when clicked
+                            MenuAction('How to Use This App', show_help_window),
+                            MenuAction('About', lambda: api.window.evaluate_js(
+                                'alert("DeepFak3r VibeVoice v1.0\\n\\nFor support: support@deepfak3r.com")'
+                            ))
+                        ]
+                    )
+                ]
+                
+                # Create window with proper configuration
+            index_path = resource_path("out/index.html")
+                
+            webview.settings['OPEN_EXTERNAL_LINKS_IN_BROWSER'] = True
+
+            window = webview.create_window(
+                    'DeepFak3r VibeVoice',
+                    index_path,
+                    js_api=api,
+                    width=1200,
+                    height=800,
+                    min_size=(800, 600),
+                    resizable=True,
+                    shadow=True,
+                    on_top=False,
+                    confirm_close=True,
+                    menu=menu_items
+                )
+                
+            # Set window reference for API
+            api.set_window(window)
+                
+            # Register close event
+            window.events.closing += on_closing
+                
+            # Start the webview
+            webview.start(debug=False,private_mode=False,storage_path=data_path)
         
     except Exception as e:
         traceback.print_exc()

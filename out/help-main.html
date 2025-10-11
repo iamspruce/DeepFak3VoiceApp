@@ -77,8 +77,48 @@
         },
       };
 
-      // Load content
+      // Load content using iframe (works better in PyWebView)
       function loadContent(tab) {
+        const contentFrame = document.getElementById("content-frame");
+
+        let filename = contentMap[tab];
+
+        // If content is OS-specific, get the right file
+        if (typeof filename === "object") {
+          filename = filename[currentOS];
+        }
+
+        const filepath = `help/${filename}`;
+
+        // Create iframe for loading content
+        contentFrame.innerHTML = `
+          <iframe 
+            src="${filepath}" 
+            style="width: 100%; height: 100%; border: none; display: block;"
+            onload="this.style.display='block'; this.previousElementSibling?.remove();"
+            onerror="handleLoadError('${filepath}')">
+          </iframe>
+          <div class="loading">Loading...</div>
+        `;
+
+        // Fallback error handler
+        setTimeout(() => {
+          const iframe = contentFrame.querySelector("iframe");
+          const loading = contentFrame.querySelector(".loading");
+          if (loading && loading.parentNode) {
+            // Check if iframe loaded
+            try {
+              iframe.contentWindow.document;
+              loading.remove();
+            } catch (e) {
+              handleLoadError(filepath);
+            }
+          }
+        }, 3000);
+      }
+
+      // Alternative: Load content using XMLHttpRequest (more compatible with PyWebView)
+      function loadContentXHR(tab) {
         const contentFrame = document.getElementById("content-frame");
         contentFrame.innerHTML = '<div class="loading">Loading...</div>';
 
@@ -91,26 +131,37 @@
 
         const filepath = `help/${filename}`;
 
-        fetch(filepath)
-          .then((response) => {
-            if (!response.ok) throw new Error("Failed to load content");
-            return response.text();
-          })
-          .then((html) => {
-            contentFrame.innerHTML = html;
-            // Scroll to top
+        // Use XMLHttpRequest instead of fetch (better PyWebView compatibility)
+        const xhr = new XMLHttpRequest();
+        xhr.open("GET", filepath, true);
+
+        xhr.onload = function () {
+          if (xhr.status === 200) {
+            contentFrame.innerHTML = xhr.responseText;
             contentFrame.scrollTop = 0;
-          })
-          .catch((error) => {
-            console.error("Error loading content:", error);
-            contentFrame.innerHTML = `
-                        <div class="error">
-                            <h2>⚠️ Error Loading Content</h2>
-                            <p>Could not load help content. Please check your installation.</p>
-                            <p><strong>File:</strong> ${filepath}</p>
-                        </div>
-                    `;
-          });
+          } else {
+            handleLoadError(filepath);
+          }
+        };
+
+        xhr.onerror = function () {
+          handleLoadError(filepath);
+        };
+
+        xhr.send();
+      }
+
+      // Error handler
+      function handleLoadError(filepath) {
+        const contentFrame = document.getElementById("content-frame");
+        contentFrame.innerHTML = `
+          <div class="error">
+            <h2>⚠️ Error Loading Content</h2>
+            <p>Could not load help content. Please check your installation.</p>
+            <p><strong>File:</strong> ${filepath}</p>
+            <p><strong>Tip:</strong> Make sure the 'help' folder is in the same directory as this file.</p>
+          </div>
+        `;
       }
 
       // Tab switching
@@ -129,7 +180,8 @@
             // Show inline troubleshooting
             showTroubleshooting();
           } else {
-            loadContent(tab);
+            // Try XMLHttpRequest method first (better for PyWebView)
+            loadContentXHR(tab);
           }
         });
       });
@@ -220,7 +272,7 @@
 
       // Load initial content (Installation for detected OS)
       window.addEventListener("DOMContentLoaded", () => {
-        loadContent("installation");
+        loadContentXHR("installation");
       });
     </script>
   </body>
