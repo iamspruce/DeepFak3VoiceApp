@@ -1769,12 +1769,14 @@ class Api:
             }
     
     def cleanup_on_exit(self):
-        """
-        Cleanup when app is closing
-        Called automatically on window close
-        """
-        print("🧹 Cleaning up TTS API resources...")
-        return {"success": True, "message": "Cleanup completed"}
+        """Cleanup resources before exit"""
+        try:
+            if hasattr(self, 'pod_id') and self.pod_id:
+                logger.info(f"Terminating RunPod instance: {self.pod_id}")
+                terminate_runpod_instance(self.api_key, self.pod_id)
+                logger.info("RunPod instance terminated successfully")
+        except Exception as e:
+            logger.error(f"Failed to terminate RunPod instance: {e}")
 
 def on_closing():
   
