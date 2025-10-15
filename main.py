@@ -1779,17 +1779,15 @@ class Api:
             logger.error(f"Failed to terminate RunPod instance: {e}")
 
 def on_closing():
-  
     """Enhanced application exit handler."""
     logger.info("Application is closing...")
-    
     try:
         # Terminate RunPod instances to save costs
         if hasattr(api, '_active_runpod_instance') and api._active_runpod_instance:
             logger.info(f"Terminating RunPod instance {api._active_runpod_instance['podId']} to save costs...")
             try:
                 terminate_runpod_instance(
-                    api._active_runpod_instance['apiKey'], 
+                    api._active_runpod_instance['apiKey'],
                     api._active_runpod_instance['podId']
                 )
                 logger.info("RunPod instance termination request sent")
@@ -1799,11 +1797,12 @@ def on_closing():
         # Stop local server if running
         if hasattr(api, 'local_server_manager') and api.local_server_manager:
             api.local_server_manager.stop_server()
-                
+    
     except Exception as e:
         logger.error(f"Error during application shutdown: {e}")
     
     logger.info("Application shutdown complete")
+    return True  
 
 def terminate_runpod_instance(api_key, pod_id):
    
