@@ -985,62 +985,61 @@ class RunPodManager:
             raise
 
     def _wait_for_server_ready(self, pod_id: str, timeout=600) -> str:
-            """Waits for the pod to become ready and return its public URL."""
-            start_time = time.time()
-            get_pod_query = """
-            query getPod($podId: String!) {
-                pod(input: {podId: $podId}) {
-                    runtime {
-                        ports { ip isIpPublic privatePort publicPort }
-                    }
+        """Waits for the pod to become ready and return its public URL."""
+        start_time = time.time()
+        attempt = 0  # <--- track how many times we've checked the server
+
+        get_pod_query = """
+        query getPod($podId: String!) {
+            pod(input: {podId: $podId}) {
+                runtime {
+                    ports { ip isIpPublic privatePort publicPort }
                 }
             }
-            """
+        }
+        """
+        
+        while time.time() - start_time < timeout:
+            progress = min(60 + int((time.time() - start_time) / timeout * 35), 95)
+            self.progress_callback({
+                "stage": "starting", "progress": progress, "podId": pod_id,
+                "message": f"Waiting for server to start... ({int(time.time() - start_time)}s)"
+            })
             
-            while time.time() - start_time < timeout:
-                progress = min(60 + int((time.time() - start_time) / timeout * 35), 95)
-                self.progress_callback({
-                    "stage": "starting", "progress": progress, "podId": pod_id,
-                    "message": f"Waiting for server to start... ({int(time.time() - start_time)}s)"
-                })
-                
-                pod_data = self._graphql_request(get_pod_query, {"podId": pod_id})
-                logging.info(f"Pod data: {json.dumps(pod_data, indent=2)}")
-                
-                if pod_data is None:
-                    time.sleep(5)
-                    continue
-                
+            pod_data = self._graphql_request(get_pod_query, {"podId": pod_id})
+            logging.info(f"Pod data: {json.dumps(pod_data, indent=2)}")
+            
+            if pod_data is None:
+                pass  # just skip to sleep
+            else:
                 pod_obj = pod_data.get("pod")
-                if pod_obj is None:
-                    time.sleep(5)
-                    continue
-                
-                # Safely get the runtime object
-                runtime_info = pod_obj.get("runtime")
-                
-                # Check if runtime info is available yet. If not, continue waiting.
-                if not runtime_info:
-                    time.sleep(5)
-                    continue
+                if pod_obj:
+                    runtime_info = pod_obj.get("runtime")
+                    if runtime_info:
+                        ports = runtime_info.get("ports", [])
+                        if ports:
+                            http_port = next(
+                                (p for p in ports if p.get("privatePort") == 8000 and p.get("isIpPublic")),
+                                None
+                            )
+                            if http_port:
+                                url = f"http://{http_port['ip']}:{http_port['publicPort']}"
+                                try:
+                                    response = requests.get(f"{url}/health", timeout=5)
+                                    if response.ok:
+                                        return url
+                                except requests.RequestException:
+                                    pass  # Ignore connection errors while waiting
+            
+            # 🕒 wait before next check (exponential backoff)
+            wait_time = min(5 * (attempt + 1), 30)
+            logging.debug(f"Waiting {wait_time}s before next attempt ({attempt + 1})")
+            time.sleep(wait_time)
+            
+            attempt += 1  # increment attempt counter
+        
+        raise TimeoutError("Server failed to become ready within the timeout period.")
 
-                # Now we can safely get the ports
-                ports = runtime_info.get("ports", [])
-                
-                if ports:
-                    http_port = next((p for p in ports if p.get("privatePort") == 8000 and p.get("isIpPublic")), None)
-                    if http_port:
-                        url = f"http://{http_port['ip']}:{http_port['publicPort']}"
-                        try:
-                            response = requests.get(f"{url}/health", timeout=5)
-                            if response.ok:
-                                return url
-                        except requests.RequestException:
-                            pass # Ignore connection errors while waiting
-                
-                time.sleep(5)
-                
-            raise TimeoutError("Server failed to become ready within the timeout period.")
 
 # --- Custom Exceptions ---
 class UnsupportedArchitectureError(Exception):
