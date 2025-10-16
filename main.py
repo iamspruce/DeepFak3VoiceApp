@@ -1611,17 +1611,26 @@ class Api:
         logger.info("RunPod deployment thread started.")
 
     def _safe_runpod_deploy_wrapper(self, api_key: str):
-        """Wrapper for RunPod deployment with error handling."""
-        try:
-            manager = RunPodManager(api_key, self.send_runpod_progress_to_js)
-            instance_name = f"vibevoice-server-{int(time.time())}"
-            manager.deploy_tts_server(instance_name)
-        except Exception as e:
-            logger.error(f"RunPod deployment failed in wrapper: {e}", exc_info=True)
-            # The manager already sends a detailed error, this is a fallback.
-            self.send_runpod_progress_to_js({
-                "stage": "error", "progress": 0, "message": "Deployment failed", "error": str(e)
-            })
+            """Wrapper for RunPod deployment with error handling."""
+            try:
+                manager = RunPodManager(api_key, self.send_runpod_progress_to_js)
+                instance_name = f"vibevoice-server-{int(time.time())}"
+                
+                # 1. Capture the deployment result
+                deployment_result = manager.deploy_tts_server(instance_name)
+
+                # 2. Check if the deployment was successful and store the details
+                if deployment_result and "podId" in deployment_result:
+                    pod_id = deployment_result["podId"]
+                    # This makes the backend aware of the active pod for cleanup
+                    self.set_active_runpod_instance(api_key, pod_id)
+
+            except Exception as e:
+                logger.error(f"RunPod deployment failed in wrapper: {e}", exc_info=True)
+                # The manager already sends a detailed error, this is a fallback.
+                self.send_runpod_progress_to_js({
+                    "stage": "error", "progress": 0, "message": "Deployment failed", "error": str(e)
+                })
             
     def set_active_runpod_instance(self, api_key: str, pod_id: str):
         """
@@ -1903,7 +1912,7 @@ if __name__ == '__main__':
             window.events.closing += on_closing
                 
             # Start the webview
-            webview.start(debug=False,private_mode=False,storage_path=data_path)
+            webview.start(debug=True,private_mode=False,storage_path=data_path)
         
     except Exception as e:
         traceback.print_exc()
