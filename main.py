@@ -1912,7 +1912,7 @@ if __name__ == '__main__':
             window.events.closing += on_closing
                 
             # Start the webview
-            webview.start(debug=True,private_mode=False,storage_path=data_path)
+            webview.start(debug=False,private_mode=False,storage_path=data_path)
         
     except Exception as e:
         traceback.print_exc()
